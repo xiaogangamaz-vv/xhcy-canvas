@@ -28,7 +28,6 @@ import {
   type Viewport,
 } from "@xyflow/react"
 import {
-  Bot,
   ImagePlus,
   Keyboard,
   LayoutGrid,
@@ -52,7 +51,7 @@ import {
   resolveVideoModelOptions,
 } from "@/adapters/model-catalog"
 import { hydrateCanvasDocument, MOCK_OWNER_ID } from "@/adapters/mock"
-import { ExternalAgentPanel } from "@/canvas/external-agent-panel"
+import { AssistantRail, readAssistantRailOpen, type AssistantPickedNode } from "@/canvas/assistant-rail"
 import {
   WORKSPACE_WRITER_ID,
   completeGenerationCommand,
@@ -865,7 +864,9 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   const [backgroundMode, setBackgroundMode] = useState<"dots" | "lines" | "none">("dots")
   const [showHelp, setShowHelp] = useState(false)
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false)
-  const [agentPanelOpen, setAgentPanelOpen] = useState(false)
+  const [assistantOpen, setAssistantOpen] = useState(() => readAssistantRailOpen())
+  const [assistantPickNode, setAssistantPickNode] = useState(false)
+  const [assistantPickedNode, setAssistantPickedNode] = useState<AssistantPickedNode | null>(null)
   const [promptPending, setPromptPending] = useState(false)
   const [promptReply, setPromptReply] = useState<string | null>(null)
   const [promptError, setPromptError] = useState<string | null>(null)
@@ -2004,7 +2005,8 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   }
 
   return (
-    <div ref={workspaceRef} className="relative h-full w-full overflow-hidden" style={{ background: CANVAS_BACKGROUND }}>
+    <div className="flex h-full min-h-0 w-full overflow-hidden" style={{ background: CANVAS_BACKGROUND }}>
+    <div ref={workspaceRef} className="relative h-full min-h-0 min-w-0 flex-1 overflow-hidden">
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -2022,6 +2024,11 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         onMoveEnd={onMoveEnd}
         onDrop={onDrop}
         onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = "copy" }}
+        onNodeClick={(_, node) => {
+          if (assistantPickNode) {
+            setAssistantPickedNode({ id: node.id, token: Date.now() })
+          }
+        }}
         onSelectionChange={({ nodes: selected }) => setSelectedNodeId(selected[0]?.id ?? null)}
         connectionLineComponent={CanvasConnectionLine}
         deleteKeyCode={["Delete", "Backspace"]}
@@ -2145,9 +2152,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setBackgroundMode(mode => mode === "dots" ? "lines" : mode === "lines" ? "none" : "dots")} title={`背景：${backgroundMode === "dots" ? "点阵" : backgroundMode === "lines" ? "网格" : "空白"}`} aria-label="切换背景">
             <LayoutGrid className="h-4 w-4" />
           </button>
-          <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${agentPanelOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAgentPanelOpen(open => !open)} title="外部 Agent / MCP" aria-label="打开外部 Agent / MCP 面板">
-            <Bot className="h-4 w-4" />
-          </button>
+
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowHelp(true)} title="打开快捷键说明" aria-label="打开快捷键说明">
             <Keyboard className="h-4 w-4" />
           </button>
@@ -2193,7 +2198,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         </div>
       ) : null}
 
-      <ExternalAgentPanel open={agentPanelOpen} onClose={() => setAgentPanelOpen(false)} />
+
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-stretch gap-2 p-3">
         <div className="pointer-events-auto mx-auto w-full max-w-[min(96vw,1100px)]">
@@ -2409,6 +2414,16 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         </div>,
         globalThis.document.body,
       ) : null}
+    </div>
+      <AssistantRail
+        open={assistantOpen}
+        onOpenChange={setAssistantOpen}
+        document={document}
+        selectedNodeId={selectedNodeId}
+        pickedNode={assistantPickedNode}
+        pickNodeActive={assistantPickNode}
+        onPickNodeActiveChange={setAssistantPickNode}
+      />
     </div>
   )
 }

@@ -14,9 +14,11 @@ type ClientId = "claude" | "codex"
 export function ExternalAgentPanel({
   open,
   onClose,
+  variant = "overlay",
 }: {
   open: boolean
-  onClose: () => void
+  onClose?: () => void
+  variant?: "overlay" | "embedded"
 }) {
   const [readOnly, setReadOnly] = useState(false)
   const [config, setConfig] = useState<WorkspaceSyncConfig | null>(null)
@@ -71,6 +73,88 @@ export function ExternalAgentPanel({
     }
   }
 
+  const body = (
+    <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4 text-[12px] leading-6 text-text-secondary">
+      <p>
+        {online
+          ? "本地同步服务已运行。把下面的配置交给外部 Agent 后，它可以读写当前这张本地画布。"
+          : "还没有连上本地同步服务。请先在本机运行画布开发服务，再刷新这个面板。"}
+      </p>
+      <p className="text-text-weak">开发地址：http://127.0.0.1:5173/canvas/。外部 Agent 接入时请保持这个页面打开。</p>
+      <p className="text-text-weak">内置助手将在网站模型接入后再做。一键接入只会在你点下「一键接入」或「断开」时改动对应命令行配置。</p>
+
+      <label className="flex items-center gap-2 text-text-primary">
+        <input
+          type="checkbox"
+          checked={readOnly}
+          onChange={event => setReadOnly(event.target.checked)}
+        />
+        只读连接（生成的配置带 --read-only，不注册写工具）
+      </label>
+
+      {config ? (
+        <>
+          <section className="space-y-2">
+            <h3 className="text-[11px] font-medium tracking-wide text-text-primary">一键接入</h3>
+            <ClientRow
+              label="Claude Code"
+              probe={config.clients.claude}
+              busy={busy === "claude"}
+              onConnect={() => void runClientAction("claude", "connect")}
+              onDisconnect={() => void runClientAction("claude", "disconnect")}
+            />
+            <ClientRow
+              label="Codex"
+              probe={config.clients.codex}
+              busy={busy === "codex"}
+              onConnect={() => void runClientAction("codex", "connect")}
+              onDisconnect={() => void runClientAction("codex", "disconnect")}
+            />
+          </section>
+
+          <section className="space-y-2">
+            <h3 className="text-[11px] font-medium tracking-wide text-text-primary">手动配置</h3>
+            <p>Cursor：把 JSON 合并到 ~/.cursor/mcp.json 的 mcpServers。</p>
+            <CopyBlock label="Cursor" value={config.cursorJson} copied={copied} onCopy={copyText} />
+            <p>Claude Desktop：在「设置 → 开发者 → 编辑配置」中合并下面的 mcpServers，然后完全退出并重新打开。</p>
+            <CopyBlock label="Claude Desktop" value={config.claudeJson} copied={copied} onCopy={copyText} />
+            <p>Codex：可复制 JSON，或使用同内容的 TOML 片段写入配置文件。也可以在本机用命令行接入。</p>
+            <CopyBlock label="Codex JSON" value={config.codexJson} copied={copied} onCopy={copyText} />
+            <CopyBlock label="Codex TOML" value={config.codexToml} copied={copied} onCopy={copyText} />
+          </section>
+
+          <section className="space-y-1">
+            <h3 className="text-[11px] font-medium tracking-wide text-text-primary">命令行启动</h3>
+            <p>在画布项目目录执行：</p>
+            <CopyBlock label="启动命令" value={config.npmScript} copied={copied} onCopy={copyText} />
+            <p className="text-text-weak break-all">数据目录：{config.dataDir}</p>
+          </section>
+
+          <section className="space-y-1">
+            <h3 className="text-[11px] font-medium tracking-wide text-text-primary">使用说明</h3>
+            <pre className="whitespace-pre-wrap rounded-xl bg-black/20 p-3 text-[11px] text-text-secondary">{config.guide}</pre>
+          </section>
+        </>
+      ) : (
+        <p>正在读取本地配置… 如果长时间没有结果，请确认开发服务仍在 127.0.0.1:5173 运行。</p>
+      )}
+
+      {message ? <p className="rounded-xl bg-black/20 px-3 py-2 text-text-primary">{message}</p> : null}
+    </div>
+  )
+
+  if (variant === "embedded") {
+    return (
+      <div className="flex h-full min-h-0 flex-col overflow-hidden">
+        <div className="flex shrink-0 items-center gap-2 border-b border-white/10 px-4 py-3 text-sm text-text-primary">
+          <Bot className="h-4 w-4" />
+          外部 Agent / MCP
+        </div>
+        {body}
+      </div>
+    )
+  }
+
   return (
     <div className="absolute bottom-24 right-6 top-20 z-40 flex w-[min(92vw,420px)] flex-col overflow-hidden rounded-2xl border shadow-2xl" style={{ background: CANVAS_TOOLBAR_PANEL, borderColor: CANVAS_TOOLBAR_BORDER }}>
       <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
@@ -78,78 +162,13 @@ export function ExternalAgentPanel({
           <Bot className="h-4 w-4" />
           外部 Agent / MCP
         </div>
-        <button type="button" className="rounded-lg p-1 text-text-secondary hover:bg-surface-hover hover:text-text-primary" onClick={onClose} aria-label="关闭面板">
-          <X className="h-4 w-4" />
-        </button>
+        {onClose ? (
+          <button type="button" className="rounded-lg p-1 text-text-secondary hover:bg-surface-hover hover:text-text-primary" onClick={onClose} aria-label="关闭面板">
+            <X className="h-4 w-4" />
+          </button>
+        ) : null}
       </div>
-
-      <div className="flex-1 space-y-4 overflow-y-auto px-4 py-4 text-[12px] leading-6 text-text-secondary">
-        <p>
-          {online
-            ? "本地同步服务已运行。把下面的配置交给外部 Agent 后，它可以读写当前这张本地画布。"
-            : "还没有连上本地同步服务。请先在本机运行画布开发服务，再刷新这个面板。"}
-        </p>
-        <p className="text-text-weak">开发地址：http://127.0.0.1:5173/canvas/。外部 Agent 接入时请保持这个页面打开。</p>
-        <p className="text-text-weak">内置助手将在网站模型接入后再做。</p>
-
-        <label className="flex items-center gap-2 text-text-primary">
-          <input
-            type="checkbox"
-            checked={readOnly}
-            onChange={event => setReadOnly(event.target.checked)}
-          />
-          只读连接（生成的配置带 --read-only，不注册写工具）
-        </label>
-
-        {config ? (
-          <>
-            <section className="space-y-2">
-              <h3 className="text-[11px] font-medium tracking-wide text-text-primary">一键接入</h3>
-              <ClientRow
-                label="Claude Code"
-                probe={config.clients.claude}
-                busy={busy === "claude"}
-                onConnect={() => void runClientAction("claude", "connect")}
-                onDisconnect={() => void runClientAction("claude", "disconnect")}
-              />
-              <ClientRow
-                label="Codex"
-                probe={config.clients.codex}
-                busy={busy === "codex"}
-                onConnect={() => void runClientAction("codex", "connect")}
-                onDisconnect={() => void runClientAction("codex", "disconnect")}
-              />
-            </section>
-
-            <section className="space-y-2">
-              <h3 className="text-[11px] font-medium tracking-wide text-text-primary">手动配置</h3>
-              <p>Cursor：把 JSON 合并到 ~/.cursor/mcp.json 的 mcpServers。</p>
-              <CopyBlock label="Cursor" value={config.cursorJson} copied={copied} onCopy={copyText} />
-              <p>Claude Desktop：在「设置 → 开发者 → 编辑配置」中合并下面的 mcpServers，然后完全退出并重新打开。</p>
-              <CopyBlock label="Claude Desktop" value={config.claudeJson} copied={copied} onCopy={copyText} />
-              <p>Codex：可复制 JSON，或使用同内容的 TOML 片段写入配置文件。也可以在本机用命令行接入。</p>
-              <CopyBlock label="Codex JSON" value={config.codexJson} copied={copied} onCopy={copyText} />
-              <CopyBlock label="Codex TOML" value={config.codexToml} copied={copied} onCopy={copyText} />
-            </section>
-
-            <section className="space-y-1">
-              <h3 className="text-[11px] font-medium tracking-wide text-text-primary">命令行启动</h3>
-              <p>在画布项目目录执行：</p>
-              <CopyBlock label="启动命令" value={config.npmScript} copied={copied} onCopy={copyText} />
-              <p className="text-text-weak break-all">数据目录：{config.dataDir}</p>
-            </section>
-
-            <section className="space-y-1">
-              <h3 className="text-[11px] font-medium tracking-wide text-text-primary">使用说明</h3>
-              <pre className="whitespace-pre-wrap rounded-xl bg-black/20 p-3 text-[11px] text-text-secondary">{config.guide}</pre>
-            </section>
-          </>
-        ) : (
-          <p>正在读取本地配置… 如果长时间没有结果，请确认开发服务仍在 127.0.0.1:5173 运行。</p>
-        )}
-
-        {message ? <p className="rounded-xl bg-black/20 px-3 py-2 text-text-primary">{message}</p> : null}
-      </div>
+      {body}
     </div>
   )
 }
