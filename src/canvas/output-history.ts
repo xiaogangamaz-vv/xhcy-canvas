@@ -51,6 +51,26 @@ export function prependCanvasOutputHistory(
   return serializeCanvasOutputHistory([entry, ...current])
 }
 
+export function collectDocumentOutputHistory(
+  nodes: readonly { type: string; params?: unknown }[],
+): CanvasOutputHistoryEntry[] {
+  const merged: CanvasOutputHistoryEntry[] = []
+  const seen = new Set<string>()
+  for (const node of nodes) {
+    if (node.type !== "generation") continue
+    const raw = node.params && typeof node.params === "object" && "outputHistory" in node.params
+      ? (node.params as { outputHistory?: unknown }).outputHistory
+      : undefined
+    for (const entry of parseCanvasOutputHistory(typeof raw === "string" ? raw : undefined)) {
+      if (seen.has(entry.id) || seen.has(entry.assetId)) continue
+      seen.add(entry.id)
+      seen.add(entry.assetId)
+      merged.push(entry)
+    }
+  }
+  return merged.sort((a, b) => b.createdAt - a.createdAt)
+}
+
 export function toggleOutputCompare(current: readonly string[], id: string): string[] {
   if (current.includes(id)) return current.filter(item => item !== id)
   if (current.length >= OUTPUT_COMPARE_LIMIT) return [...current.slice(1), id]

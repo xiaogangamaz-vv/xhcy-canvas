@@ -140,8 +140,7 @@ import {
   parsePrevisDraftDocument,
   writePrevisDraftDocument,
 } from "@/canvas/previs-command"
-import { CanvasNodeOutputHistory } from "@/canvas/node-output-history"
-import { prependCanvasOutputHistory } from "@/canvas/output-history"
+import { collectDocumentOutputHistory, prependCanvasOutputHistory } from "@/canvas/output-history"
 import {
   CanvasAudioInspector,
   CanvasCharacterInspector,
@@ -2131,9 +2130,6 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => fileInputRef.current?.click()} title="上传素材" aria-label="上传素材">
             <Upload className="h-4 w-4" />
           </button>
-          <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${assetLibraryOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAssetLibraryOpen(open => !open)} title="打开素材库" aria-label="打开素材库">
-            <ImagePlus className="h-4 w-4" />
-          </button>
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={undo} title="撤销 (Ctrl+Z)" aria-label="撤销">
             <Undo2 className="h-4 w-4" />
           </button>
@@ -2159,6 +2155,9 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           <span className="ml-2 text-[10px] text-text-weak">
             {saveState === "saving" ? "自动保存中…" : saveState === "saved" ? "已保存" : saveState === "error" ? "自动保存失败，请重试" : ""}
           </span>
+          <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${assetLibraryOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAssetLibraryOpen(open => !open)} title="历史资产" aria-label="打开历史资产" aria-pressed={assetLibraryOpen}>
+            <ImagePlus className="h-4 w-4" />
+          </button>
         </div>
       </div>
 
@@ -2192,8 +2191,10 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         <div className="absolute bottom-24 left-4 top-20 z-30">
           <CanvasAssetLibrary
             assets={document.assets}
+            historyEntries={collectDocumentOutputHistory(document.nodes)}
             onClose={() => setAssetLibraryOpen(false)}
             onInsert={asset => { placeAssetOnCanvas(asset); setAssetLibraryOpen(false) }}
+            onCreateFromHistory={(_entry, asset) => { placeAssetOnCanvas(asset); setAssetLibraryOpen(false) }}
           />
         </div>
       ) : null}
@@ -2297,7 +2298,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         </div>
       ) : null}
 
-      {selectedRawNode && ["storyboard", "previs", "script", "scene", "character", "audio", "image", "video", "generation"].includes(selectedRawNode.type) ? (
+      {selectedRawNode && ["storyboard", "previs", "script", "scene", "character", "audio", "image", "video"].includes(selectedRawNode.type) ? (
         <aside className="absolute bottom-28 right-20 top-20 z-20 flex w-80 flex-col overflow-auto rounded-2xl border border-border-default bg-surface-overlay/95 p-3 shadow-2xl">
           {selectedRawNode.type === "storyboard" ? (
             <StoryboardInspector
@@ -2369,13 +2370,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
               assets={document.assets}
               onUpload={() => onAssignMedia(selectedRawNode.id)}
             />
-          ) : (
-            <CanvasNodeOutputHistory
-              historyRaw={paramString(selectedRawNode.params, "outputHistory")}
-              assets={document.assets}
-              onCreateNode={(_entry, asset) => placeAssetOnCanvas(asset, { x: selectedRawNode.position.x + selectedRawNode.size.width + 64, y: selectedRawNode.position.y })}
-            />
-          )}
+          ) : null}
         </aside>
       ) : null}
 

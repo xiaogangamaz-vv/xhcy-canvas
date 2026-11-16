@@ -1,15 +1,14 @@
-import { useMemo, useState } from "react"
+import { useState } from "react"
 import { mediaLooksLikeVideo } from "@/lib/media-cache"
 import type { CanvasAsset } from "@/domain/types"
 import {
-  parseCanvasOutputHistory,
   resolveHistoryAsset,
   toggleOutputCompare,
   type CanvasOutputHistoryEntry,
 } from "@/canvas/output-history"
 
 export type CanvasNodeOutputHistoryProps = {
-  historyRaw: string | undefined
+  entries: readonly CanvasOutputHistoryEntry[]
   assets: readonly CanvasAsset[]
   onCreateNode: (entry: CanvasOutputHistoryEntry, asset: CanvasAsset) => void
 }
@@ -36,8 +35,7 @@ function HistoryMedia({ asset }: { asset: CanvasAsset }) {
   )
 }
 
-export function CanvasNodeOutputHistory({ historyRaw, assets, onCreateNode }: CanvasNodeOutputHistoryProps) {
-  const entries = useMemo(() => parseCanvasOutputHistory(historyRaw), [historyRaw])
+export function CanvasNodeOutputHistory({ entries, assets, onCreateNode }: CanvasNodeOutputHistoryProps) {
   const [compareIds, setCompareIds] = useState<string[]>([])
   const compareRows = compareIds
     .map(id => entries.find(entry => entry.id === id))
@@ -46,8 +44,8 @@ export function CanvasNodeOutputHistory({ historyRaw, assets, onCreateNode }: Ca
   if (entries.length === 0) {
     return (
       <div>
-        <h3 className="text-[11px] font-medium text-text-primary">输出历史</h3>
-        <p className="mt-1 text-[10px] leading-4 text-text-weak">还没有成功的生成结果。运行后会把每一版留在这里，可对比或作为新节点放回画布。</p>
+        <h3 className="text-[11px] font-medium text-text-primary">生成历史</h3>
+        <p className="mt-1 text-[10px] leading-4 text-text-weak">还没有成功的生成结果。运行图像或视频生成后，每一版都会留在这里，可对比或作为新节点放回画布。</p>
       </div>
     )
   }
@@ -55,7 +53,7 @@ export function CanvasNodeOutputHistory({ historyRaw, assets, onCreateNode }: Ca
   return (
     <div className="flex flex-col gap-2">
       <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] font-medium text-text-primary">输出历史</h3>
+        <h3 className="text-[11px] font-medium text-text-primary">生成历史</h3>
         <span className="text-[10px] tabular-nums text-text-weak">{entries.length} 条</span>
       </div>
       <ul className="space-y-1.5">
