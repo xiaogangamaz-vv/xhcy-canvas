@@ -28,6 +28,7 @@ import {
   type Viewport,
 } from "@xyflow/react"
 import {
+  Bot,
   ImagePlus,
   Keyboard,
   LayoutGrid,
@@ -50,7 +51,16 @@ import {
   resolveImageModelOptions,
   resolveVideoModelOptions,
 } from "@/adapters/model-catalog"
-import { MOCK_OWNER_ID } from "@/adapters/mock"
+import { hydrateCanvasDocument, MOCK_OWNER_ID } from "@/adapters/mock"
+import { ExternalAgentPanel } from "@/canvas/external-agent-panel"
+import {
+  WORKSPACE_WRITER_ID,
+  completeGenerationCommand,
+  fetchGenerationCommands,
+  fetchSyncHealth,
+  markGenerationCommandRunning,
+  pullWorkspaceDocument,
+} from "@/lib/workspace-sync"
 import { CANVAS_EDGE_TYPES } from "@/canvas/canvas-edge"
 import {
   CANVAS_BACKGROUND,
@@ -855,6 +865,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   const [backgroundMode, setBackgroundMode] = useState<"dots" | "lines" | "none">("dots")
   const [showHelp, setShowHelp] = useState(false)
   const [assetLibraryOpen, setAssetLibraryOpen] = useState(false)
+  const [agentPanelOpen, setAgentPanelOpen] = useState(false)
   const [promptPending, setPromptPending] = useState(false)
   const [promptReply, setPromptReply] = useState<string | null>(null)
   const [promptError, setPromptError] = useState<string | null>(null)
@@ -879,6 +890,8 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   const clipboardRef = useRef<CanvasClipboardPayload | null>(null)
   const pasteCountRef = useRef(0)
   const undoRef = useRef<CanvasDocument[]>([])
+  const lastSyncedRevisionRef = useRef(0)
+  const processingCommandsRef = useRef(new Set<string>())
   const redoRef = useRef<CanvasDocument[]>([])
   const documentRef = useRef<CanvasDocument | null>(null)
   const nodesRef = useRef(nodes)
@@ -905,7 +918,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     onGenerateFromText: undefined,
   })
 
-  const applyDocument = useCallback((next: CanvasDocument, recordHistory = false) => {
+  const applyDocument = useCallback((next: CanvasDocument, recordHistory = false, options?: { keepViewport?: boolean }) => {
     if (recordHistory && documentRef.current) {
       undoRef.current = [...undoRef.current, documentRef.current].slice(-UNDO_LIMIT)
       redoRef.current = []
@@ -915,7 +928,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     const actions = actionsRef.current
     setNodes(next.nodes.map(node => toFlowNode(node, actions)))
     setEdges(next.edges.map(toFlowEdge))
-    if (next.viewport) {
+    if (next.viewport && !options?.keepViewport) {
       ignoreSaveRef.current = true
       void setViewport(next.viewport, { duration: 0 })
       queueMicrotask(() => { ignoreSaveRef.current = false })
@@ -932,6 +945,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         .then(saved => {
           documentRef.current = saved
           setDocument(saved)
+          lastSyncedRevisionRef.current = saved.revision ?? lastSyncedRevisionRef.current
           setSaveState("saved")
         })
         .catch(() => setSaveState("error"))
@@ -982,6 +996,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     let cancelled = false
     void host.loadDocument().then(loaded => {
       if (cancelled) return
+      lastSyncedRevisionRef.current = loaded.revision ?? 0
       applyDocument(loaded, false)
       setLoadError(null)
     }).catch(error => {
@@ -1166,17 +1181,21 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     scheduleSave(next)
   }, [scheduleSave, selectedRawNode])
 
-  const runSelectedGeneration = useCallback(async () => {
-    if (!selectedRawNode || selectedRawNode.type !== "generation") return
-    const mediaType = composerDraft.mediaType === "video" ? "video" : "image"
-    const prompt = (composerDraft.prompt || "").trim()
-    const modelId = composerDraft.modelId
-    if (!prompt || !modelId) return
+  const runGenerationForNode = useCallback(async (nodeId: string, draftOverride?: Record<string, string>) => {
     const current = documentRef.current
-    if (!current) return
-    setGeneratingNodeId(selectedRawNode.id)
+    const node = current?.nodes.find(item => item.id === nodeId)
+    if (!current || !node || node.type !== "generation") {
+      return { status: "failed" as const, message: "目标不是生成节点" }
+    }
+    const draft = { ...asParams(node.params), ...(draftOverride || {}) }
+    const mediaType = draft.mediaType === "video" ? "video" : "image"
+    const prompt = (draft.prompt || "").trim()
+    const modelId = draft.modelId
+    if (!prompt) return { status: "failed" as const, message: "请先填写提示词" }
+    if (!modelId) return { status: "failed" as const, message: "请选择一个模型" }
+    setGeneratingNodeId(node.id)
     setGenerationError(null)
-    const running = current.nodes.map(item => item.id === selectedRawNode.id ? { ...item, status: "running" as const, updatedAt: Date.now() } as CanvasNode : item)
+    const running = current.nodes.map(item => item.id === node.id ? { ...item, status: "running" as const, updatedAt: Date.now() } as CanvasNode : item)
     const runningDoc = { ...current, nodes: running }
     setNodes(runningDoc.nodes.map(item => toFlowNode(item, actionsRef.current)))
     documentRef.current = runningDoc
@@ -1184,25 +1203,25 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     try {
       const modelName = (mediaType === "video" ? videoModels : imageModels).find(model => model.id === modelId)?.name
       const result = await host.runGeneration({
-        nodeId: selectedRawNode.id,
+        nodeId: node.id,
         mediaType,
         prompt,
         modelId,
         modelName,
-        aspectRatio: composerDraft.aspectRatio,
-        imageSize: composerDraft.imageSize,
-        resolution: composerDraft.resolution,
-        durationSeconds: composerDraft.durationSeconds,
-        generationCount: Number(composerDraft.generationCount || "1") || 1,
-        referenceUrls: selectedRawNode.assetRefs.map(ref => ref.url).filter((url): url is string => Boolean(url)),
+        aspectRatio: draft.aspectRatio,
+        imageSize: draft.imageSize,
+        resolution: draft.resolution,
+        durationSeconds: draft.durationSeconds,
+        generationCount: Number(draft.generationCount || "1") || 1,
+        referenceUrls: node.assetRefs.map(ref => ref.url).filter((url): url is string => Boolean(url)),
       })
       const latest = documentRef.current
-      if (!latest) return
+      if (!latest) return { status: "failed" as const, message: "画布已关闭" }
       if (result.status === "succeeded" && result.asset) {
         const asset = result.asset
-        const resultId = paramString(selectedRawNode.params, "resultAssetId")
+        const resultId = paramString(node.params, "resultAssetId")
         const nextNodes = latest.nodes.map(item => {
-          if (item.id !== selectedRawNode.id) return item
+          if (item.id !== node.id) return item
           const params = asParams(item.params)
           const keptRefs = item.assetRefs.filter(ref => ref.assetId !== resultId && ref.assetId !== asset.id)
           return {
@@ -1220,7 +1239,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
                 modelId,
                 modelName,
                 mediaType,
-                aspectRatio: composerDraft.aspectRatio,
+                aspectRatio: draft.aspectRatio,
               }),
             },
             updatedAt: Date.now(),
@@ -1230,26 +1249,36 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
         scheduleSave(next)
         setGenerationError(null)
-      } else {
-        const nextNodes = latest.nodes.map(item => item.id === selectedRawNode.id ? { ...item, status: "failed" as const, updatedAt: Date.now() } as CanvasNode : item)
-        const next = { ...latest, nodes: nextNodes }
-        setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
-        scheduleSave(next)
-        setGenerationError(result.message || "生成失败")
+        return { status: "succeeded" as const, assetId: asset.id }
       }
+      const nextNodes = latest.nodes.map(item => item.id === node.id ? { ...item, status: "failed" as const, updatedAt: Date.now() } as CanvasNode : item)
+      const next = { ...latest, nodes: nextNodes }
+      setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
+      scheduleSave(next)
+      const message = result.message || "生成失败"
+      setGenerationError(message)
+      return { status: "failed" as const, message }
     } catch (error) {
       const latest = documentRef.current
       if (latest) {
-        const nextNodes = latest.nodes.map(item => item.id === selectedRawNode.id ? { ...item, status: "failed" as const, updatedAt: Date.now() } as CanvasNode : item)
+        const nextNodes = latest.nodes.map(item => item.id === node.id ? { ...item, status: "failed" as const, updatedAt: Date.now() } as CanvasNode : item)
         const next = { ...latest, nodes: nextNodes }
         setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
         scheduleSave(next)
       }
-      setGenerationError(error instanceof Error ? error.message : "生成失败")
+      const message = error instanceof Error ? error.message : "生成失败"
+      setGenerationError(message)
+      return { status: "failed" as const, message }
     } finally {
       setGeneratingNodeId(null)
     }
-  }, [composerDraft, host, imageModels, scheduleSave, selectedRawNode, videoModels])
+  }, [host, imageModels, scheduleSave, videoModels])
+
+  const runSelectedGeneration = useCallback(async () => {
+    if (!selectedRawNode || selectedRawNode.type !== "generation") return
+    await runGenerationForNode(selectedRawNode.id, composerDraft)
+  }, [composerDraft, runGenerationForNode, selectedRawNode])
+
 
   const composerConfig = useMemo<CanvasNodeComposerConfig | null>(() => {
     if (!selectedRawNode || selectedRawNode.type !== "generation") return null
@@ -1758,7 +1787,49 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     void placeFiles(files, position)
   }, [assignFilesToNode, placeFiles, screenToFlowPosition])
 
+  useEffect(() => {
+    if (!document) return
+    let cancelled = false
+    const tick = async () => {
+      const health = await fetchSyncHealth()
+      if (cancelled || !health) return
+      if (health.writerId === WORKSPACE_WRITER_ID) {
+        lastSyncedRevisionRef.current = Math.max(lastSyncedRevisionRef.current, health.revision)
+      } else if (health.revision > lastSyncedRevisionRef.current && !saveTimerRef.current) {
+        const pulled = await pullWorkspaceDocument()
+        if (cancelled || !pulled?.document || !documentRef.current) return
+        if ((pulled.document.revision ?? 0) <= lastSyncedRevisionRef.current) return
+        const hydrated = await hydrateCanvasDocument(pulled.document)
+        if (cancelled) return
+        lastSyncedRevisionRef.current = hydrated.revision ?? lastSyncedRevisionRef.current
+        applyDocument(hydrated, true, { keepViewport: true })
+      }
+
+      const log = await fetchGenerationCommands()
+      if (cancelled || !log) return
+      for (const command of log.pending) {
+        if (command.type !== "run_generation") continue
+        if (processingCommandsRef.current.has(command.operationId)) continue
+        if (log.results[command.operationId]) continue
+        processingCommandsRef.current.add(command.operationId)
+        void (async () => {
+          await markGenerationCommandRunning(command.operationId)
+          const result = await runGenerationForNode(command.nodeId)
+          await completeGenerationCommand(command.operationId, result)
+          processingCommandsRef.current.delete(command.operationId)
+        })()
+      }
+    }
+    const timer = window.setInterval(() => { void tick() }, 1000)
+    void tick()
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [applyDocument, document, runGenerationForNode])
+
   const restoreDocument = useCallback((next: CanvasDocument) => {
+
     applyDocument(next, false)
     scheduleSave(next)
   }, [applyDocument, scheduleSave])
@@ -2074,6 +2145,9 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setBackgroundMode(mode => mode === "dots" ? "lines" : mode === "lines" ? "none" : "dots")} title={`背景：${backgroundMode === "dots" ? "点阵" : backgroundMode === "lines" ? "网格" : "空白"}`} aria-label="切换背景">
             <LayoutGrid className="h-4 w-4" />
           </button>
+          <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${agentPanelOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAgentPanelOpen(open => !open)} title="外部 Agent / MCP" aria-label="打开外部 Agent / MCP 面板">
+            <Bot className="h-4 w-4" />
+          </button>
           <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowHelp(true)} title="打开快捷键说明" aria-label="打开快捷键说明">
             <Keyboard className="h-4 w-4" />
           </button>
@@ -2118,6 +2192,8 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           />
         </div>
       ) : null}
+
+      <ExternalAgentPanel open={agentPanelOpen} onClose={() => setAgentPanelOpen(false)} />
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-stretch gap-2 p-3">
         <div className="pointer-events-auto mx-auto w-full max-w-[min(96vw,1100px)]">

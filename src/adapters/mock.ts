@@ -10,6 +10,13 @@ import {
   isEphemeralMediaUrl,
   putCachedMedia,
 } from "@/lib/media-cache"
+import {
+  dataUrlToRaw,
+  pullWorkspaceDocument,
+  pullWorkspaceMedia,
+  pushWorkspaceDocument,
+  pushWorkspaceMedia,
+} from "@/lib/workspace-sync"
 
 export const MOCK_PROJECT_ID = "local-project"
 export const MOCK_CANVAS_ID = "local-canvas"
@@ -80,6 +87,22 @@ async function cacheAssetBytes(asset: CanvasAsset, blob: Blob, name?: string): P
   const key = cacheKeyForAsset(asset)
   await putCachedMedia({ id: key, blob, mimeType: asset.mimeType || blob.type, name: name || asset.title })
   const previewUrl = blobToObjectUrl(blob)
+  void pushWorkspaceMedia({
+    assetId: asset.id,
+    blob,
+    mimeType: asset.mimeType || blob.type,
+    name: name || asset.title,
+  })
+  const posterRaw = typeof asset.metadata?.posterDataUrl === "string" ? dataUrlToRaw(asset.metadata.posterDataUrl) : null
+  if (posterRaw) {
+    void pushWorkspaceMedia({
+      assetId: asset.id,
+      blob: posterRaw.blob,
+      mimeType: posterRaw.mimeType,
+      name: `${name || asset.title}-poster`,
+      kind: "poster",
+    })
+  }
   const canEmbed = blob.type.startsWith("image/") && blob.size <= SMALL_DATA_URL_LIMIT
   let embedded: string | null = null
   if (canEmbed) {
@@ -206,6 +229,17 @@ async function hydrateDocument(document: CanvasDocument): Promise<CanvasDocument
         continue
       }
     }
+    const remoteMedia = await pullWorkspaceMedia(asset.id)
+    if (remoteMedia?.blob) {
+      await putCachedMedia({ id: key, blob: remoteMedia.blob, mimeType: remoteMedia.mimeType, name: asset.title })
+      assets.push({
+        ...asset,
+        url: blobToObjectUrl(remoteMedia.blob),
+        mimeType: asset.mimeType || remoteMedia.mimeType,
+        storageKey: key,
+      })
+      continue
+    }
     assets.push({
       ...asset,
       url: isEphemeralMediaUrl(asset.url) ? null : asset.url,
@@ -314,8 +348,19 @@ async function cacheGenerationAsset(request: CanvasGenerationRequest): Promise<C
 export function createMockHost(): HostPort {
   return {
     async loadDocument() {
-      const stored = readStoredDocument() ?? createEmptyDocument()
-      return hydrateDocument(stored)
+      const stored = readStoredDocument()
+      const remote = await pullWorkspaceDocument()
+      let chosen = stored ?? createEmptyDocument()
+      if (remote?.document) {
+        if (!stored || (remote.document.revision ?? 0) >= (stored.revision ?? 0)) {
+          chosen = remote.document
+        } else {
+          await pushWorkspaceDocument(sanitizeDocument(stored))
+        }
+      } else if (stored) {
+        await pushWorkspaceDocument(sanitizeDocument(stored))
+      }
+      return hydrateDocument(chosen)
     },
     async saveDocument(document) {
       const next: CanvasDocument = {
@@ -331,6 +376,10 @@ export function createMockHost(): HostPort {
           ...next,
           assets: next.assets.map(asset => ({ ...sanitizeAsset(asset), url: null })),
         }))
+      }
+      const pushed = await pushWorkspaceDocument(sanitizeDocument(next))
+      if (pushed.conflict && pushed.document) {
+        return hydrateDocument(pushed.document)
       }
       return next
     },
@@ -384,4 +433,7 @@ export function createMockHost(): HostPort {
       }
     },
   }
+}
+export async function hydrateCanvasDocument(document: CanvasDocument): Promise<CanvasDocument> {
+  return hydrateDocument(document)
 }

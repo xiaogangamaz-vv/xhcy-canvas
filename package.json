@@ -4,22 +4,27 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "dev": "vite --host 127.0.0.1 --port 5173 --strictPort",
+    "build": "tsc --noEmit && tsc --noEmit -p tsconfig.local.json && vite build",
+    "preview": "vite preview",
+    "mcp": "tsx ./local/mcp-server.ts",
+    "mcp:readonly": "tsx ./local/mcp-server.ts --read-only"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
     "@xyflow/react": "^12.11.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.17.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
     "tailwind-merge": "^3.6.0",
+    "tsx": "^4.23.15",
     "zod": "^4.4.3",
     "zustand": "^5.0.14"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.1.16",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.2.4",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.1.0",
