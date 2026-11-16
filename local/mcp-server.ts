@@ -302,7 +302,7 @@ function registerWriteTools(server: McpServer) {
 
   server.registerTool("canvas_run_generation", {
     title: "触发生成",
-    description: "对一个已配置的生成节点触发本地预览生成。这不是真实模型出图，需要画布页面保持打开。",
+    description: "对一个已配置的生成节点触发生成。若已配置网站 API Token，则走网站模型并按站内规则计费；未配置时只做本地占位预览。需要画布页面保持打开。",
     inputSchema: {
       operationId,
       nodeId: z.string().trim().min(1).max(160),

@@ -50,6 +50,8 @@ import {
   resolveImageModelOptions,
   resolveVideoModelOptions,
 } from "@/adapters/model-catalog"
+import { onSiteConnectionChange } from "@/adapters/site-config"
+import { SiteSettingsButton } from "@/canvas/site-settings"
 import { hydrateCanvasDocument, MOCK_OWNER_ID } from "@/adapters/mock"
 import { AssistantRail, readAssistantRailOpen, type AssistantPickedNode } from "@/canvas/assistant-rail"
 import {
@@ -1007,17 +1009,21 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
 
   useEffect(() => {
     let cancelled = false
-    void Promise.all([host.listImageModels(), host.listVideoModels()]).then(([image, video]) => {
-      if (cancelled) return
-      setImageCatalog(image)
-      setVideoCatalog(video)
-    }).catch(() => {
-      if (!cancelled) {
-        setImageCatalog(null)
-        setVideoCatalog(null)
-      }
-    })
-    return () => { cancelled = true }
+    const load = () => {
+      void Promise.all([host.listImageModels(), host.listVideoModels()]).then(([image, video]) => {
+        if (cancelled) return
+        setImageCatalog(image)
+        setVideoCatalog(video)
+      }).catch(() => {
+        if (!cancelled) {
+          setImageCatalog(null)
+          setVideoCatalog(null)
+        }
+      })
+    }
+    load()
+    const stop = onSiteConnectionChange(load)
+    return () => { cancelled = true; stop() }
   }, [host])
 
   useEffect(() => {
@@ -1075,7 +1081,11 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     const modelId = mediaType === "video"
       ? (videoCatalog?.primaryModelId || videoCatalog?.models[0]?.id || "")
       : (imageCatalog?.primaryModelId || imageCatalog?.models[0]?.id || "")
-    const params = defaultGenerationParams(mediaType, modelId)
+    const params = clampDraftToModel(
+      defaultGenerationParams(mediaType, modelId),
+      imageCatalog?.models ?? [],
+      videoCatalog?.models ?? [],
+    )
     const frame = frameBoxFromAspectRatio(params.aspectRatio)
     const center = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
     const definition = CANVAS_NODE_REGISTRY.generation
@@ -1305,7 +1315,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     })
     const model = models.find(item => item.id === composerDraft.modelId)
     const requiresPrompt = mediaType === "image" ? (model && "requiresPrompt" in model ? model.requiresPrompt : true) : true
-    const requiresImage = mediaType === "image" && model && "requiresImage" in model ? model.requiresImage : false
+    const requiresImage = Boolean(model && "requiresImage" in model && model.requiresImage)
     let runDisabledReason: string | null = null
     if (requiresPrompt && !(composerDraft.prompt || "").trim()) runDisabledReason = "请先填写提示词"
     else if (!composerDraft.modelId) runDisabledReason = "请选择一个模型"
@@ -1332,6 +1342,10 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
       generationError,
       onGenerate: () => { void runSelectedGeneration() },
       onCancel: undefined,
+      lockOptionsToCatalog: (mediaType === "video" ? videoCatalog : imageCatalog)?.source === "site",
+      previewOnly: (mediaType === "video" ? videoCatalog : imageCatalog)?.previewOnly === true,
+      catalogMessage: (mediaType === "video" ? videoCatalog : imageCatalog)?.unavailableMessage || null,
+      maxGenerationCount: (model && "maxGenerationCount" in model ? model.maxGenerationCount : undefined) ?? (mediaType === "video" ? 1 : 4),
     }
   }, [composerDraft, document, generationError, generatingNodeId, imageModels, patchComposer, runSelectedGeneration, selectedRawNode, toggleGenerationReference, videoModels])
 
@@ -1665,7 +1679,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     const source = current.nodes.find(node => node.id === nodeId)
     if (!source || source.type !== "text") return
     const text = paramString(source.params, "text").trim()
-    const created = createNode("generation", { x: source.position.x + source.size.width + 80, y: source.position.y }, defaultGenerationParams("image", imageModels[0]?.id || ""))
+    const created = createNode("generation", { x: source.position.x + source.size.width + 80, y: source.position.y }, clampDraftToModel(defaultGenerationParams("image", imageModels[0]?.id || ""), imageModels, videoModels))
     if (!created) return
     if (text) patchNodeParams(created.id, { prompt: text, mediaType: "image", moduleKey: "text-to-image" }, false)
     addCanvasEdge(source.id, created.id, "out", null)
@@ -1723,7 +1737,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         "generation",
         { x: selectedRawNode.position.x + selectedRawNode.size.width + 96, y: selectedRawNode.position.y },
         {
-          ...defaultGenerationParams("video", videoModels[0]?.id || ""),
+          ...clampDraftToModel(defaultGenerationParams("video", videoModels[0]?.id || ""), imageModels, videoModels),
           prompt: composed.prompt,
           durationSeconds: String(composed.durationSeconds || 4),
         },
@@ -2155,6 +2169,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           <span className="ml-2 text-[10px] text-text-weak">
             {saveState === "saving" ? "自动保存中…" : saveState === "saved" ? "已保存" : saveState === "error" ? "自动保存失败，请重试" : ""}
           </span>
+          <SiteSettingsButton />
           <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${assetLibraryOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAssetLibraryOpen(open => !open)} title="历史资产" aria-label="打开历史资产" aria-pressed={assetLibraryOpen}>
             <ImagePlus className="h-4 w-4" />
           </button>

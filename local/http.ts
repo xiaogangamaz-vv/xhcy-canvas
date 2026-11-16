@@ -30,6 +30,7 @@ import {
   updateNode,
 } from "./document-ops.ts"
 import { isWorkspaceDocument, type GenerationCommandResult } from "./types.ts"
+import { proxySiteRequest, publicSiteConfig, readStoredSiteConfig, writeStoredSiteConfig } from "./site-config.ts"
 
 const WRITER_HEADER = "x-writer-id"
 
@@ -117,6 +118,32 @@ export async function handleSyncRequest(ctx: SyncContext, req: IncomingMessage, 
   const route = stripPrefix(url.pathname)
   const method = (req.method || "GET").toUpperCase()
   try {
+    if (route === "/site-config" && method === "GET") {
+      sendJson(res, 200, publicSiteConfig(readStoredSiteConfig(ctx.repoRoot)))
+      return true
+    }
+
+    if (route === "/site-config" && method === "PUT") {
+      const body = await readJsonBody(req, 32_000) as Record<string, unknown>
+      try {
+        const saved = writeStoredSiteConfig(ctx.repoRoot, {
+          baseUrl: typeof body.baseUrl === "string" ? body.baseUrl : undefined,
+          token: typeof body.token === "string" ? body.token : undefined,
+          clearToken: body.clearToken === true,
+        })
+        sendJson(res, 200, publicSiteConfig(saved))
+      } catch (error) {
+        sendError(res, 400, error instanceof Error ? error.message : "无效的网站配置", "invalid_config")
+      }
+      return true
+    }
+
+    if (route.startsWith("/site-api/")) {
+      const rest = route.slice("/site-api".length) + url.search
+      await proxySiteRequest(ctx.repoRoot, req, res, rest)
+      return true
+    }
+
     if (route === "/health" && method === "GET") {
       const meta = readMeta(ctx.store)
       const readOnly = url.searchParams.get("readOnly") === "1"

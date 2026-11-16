@@ -21,7 +21,7 @@ export const CANVAS_USAGE_GUIDE = `# 本地画布使用说明
 - canvas_create_node / canvas_update_node / canvas_delete_node：创建、更新或删除节点。
 - canvas_create_edge / canvas_delete_edge：创建或删除连线。服务会校验连接规则，并拒绝形成环的连线。
 - canvas_configure_generator：为生成节点设置提示词、比例、尺寸、时长或模型。
-- canvas_run_generation：触发该节点已有的本地预览生成。这是本地占位预览，不是真实模型出图。调用前请先准备好提示词和模型。
+- canvas_run_generation：触发该节点的生成。若已配置网站 API Token，则走网站模型并按站内规则计费；未配置时只做本地占位预览。调用前请先准备好提示词和模型，并保持画布页面打开。
 
 ## 结果怎么看
 

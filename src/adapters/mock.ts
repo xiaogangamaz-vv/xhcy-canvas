@@ -1,5 +1,7 @@
 import type { CanvasAsset, CanvasDocument, CanvasGenerationRequest, CanvasGenerationResult, HostPort } from "@/adapters/host"
-import { listMockImageModels, listMockVideoModels } from "@/adapters/model-catalog"
+import { IMAGE_MODULE_KEY, VIDEO_MODULE_KEY, listMockImageModels, listMockVideoModels } from "@/adapters/model-catalog"
+import { fetchSiteImageCatalog, fetchSiteVideoCatalog, runSiteGeneration, siteAssetMetadata } from "@/adapters/site-api"
+import { fetchSiteConnection } from "@/adapters/site-config"
 import { renderPlaceholderDataUrl, renderPlaceholderVideo } from "@/adapters/mock-preview"
 import type { CanvasAssetKind, CanvasNode } from "@/domain/types"
 import {
@@ -345,6 +347,43 @@ async function cacheGenerationAsset(request: CanvasGenerationRequest): Promise<C
   }, blob, base.title)
 }
 
+export async function cacheGeneratedBlob(input: {
+  request: CanvasGenerationRequest
+  blob: Blob
+  mimeType: string
+  width?: number | null
+  height?: number | null
+  duration?: number | null
+  metadata?: Record<string, unknown>
+}): Promise<CanvasAsset> {
+  const timestamp = now()
+  const isVideo = input.request.mediaType === "video"
+  const title = (input.request.prompt || (isVideo ? "Video" : "Image")).slice(0, 80)
+  const draft: CanvasAsset = {
+    id: crypto.randomUUID(),
+    ownerId: MOCK_OWNER_ID,
+    projectId: MOCK_PROJECT_ID,
+    canvasId: MOCK_CANVAS_ID,
+    type: isVideo ? "video" : "image",
+    source: "generation",
+    sourceTable: isVideo ? "video_assets" : "image_assets",
+    title,
+    mimeType: input.mimeType,
+    size: input.blob.size,
+    width: input.width ?? null,
+    height: input.height ?? null,
+    duration: input.duration ?? (isVideo ? Number(input.request.durationSeconds || "0") || null : null),
+    status: "active",
+    url: null,
+    storageKey: null,
+    metadata: input.metadata || { modelId: input.request.modelId },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    archivedAt: null,
+  }
+  return cacheAssetBytes(draft, input.blob, title)
+}
+
 export function createMockHost(): HostPort {
   return {
     async loadDocument() {
@@ -411,10 +450,44 @@ export function createMockHost(): HostPort {
       return cacheAssetBytes(draft, file, file.name)
     },
     async listImageModels() {
-      return listMockImageModels()
+      const connection = await fetchSiteConnection()
+      if (connection?.tokenConfigured) {
+        try {
+          return await fetchSiteImageCatalog()
+        } catch (error) {
+          return {
+            moduleKey: IMAGE_MODULE_KEY,
+            primaryModelId: null,
+            models: [],
+            channelReady: false,
+            unavailableCode: "IMAGE_CHANNEL_NOT_CONFIGURED",
+            unavailableMessage: error instanceof Error ? error.message : "无法读取网站图像模型",
+            source: "site",
+            previewOnly: false,
+          }
+        }
+      }
+      return { ...listMockImageModels(), source: "mock" as const, previewOnly: true }
     },
     async listVideoModels() {
-      return listMockVideoModels()
+      const connection = await fetchSiteConnection()
+      if (connection?.tokenConfigured) {
+        try {
+          return await fetchSiteVideoCatalog()
+        } catch (error) {
+          return {
+            moduleKey: VIDEO_MODULE_KEY,
+            primaryModelId: null,
+            models: [],
+            channelReady: false,
+            unavailableCode: "VIDEO_CHANNEL_NOT_CONFIGURED",
+            unavailableMessage: error instanceof Error ? error.message : "无法读取网站视频模型",
+            source: "site",
+            previewOnly: false,
+          }
+        }
+      }
+      return { ...listMockVideoModels(), source: "mock" as const, previewOnly: true }
     },
     async runGeneration(request) {
       const prompt = (request.prompt || "").trim()
@@ -423,6 +496,21 @@ export function createMockHost(): HostPort {
       }
       if (!request.modelId) {
         return { status: "failed", message: "请选择一个模型" }
+      }
+      const connection = await fetchSiteConnection()
+      if (connection?.tokenConfigured) {
+        try {
+          const generated = await runSiteGeneration(request)
+          const asset = await cacheGeneratedBlob({
+            request,
+            blob: generated.blob,
+            mimeType: generated.mimeType,
+            metadata: siteAssetMetadata(request, generated.taskId),
+          })
+          return { status: "succeeded", asset, previewUrl: asset.url || undefined }
+        } catch (error) {
+          return { status: "failed", message: error instanceof Error ? error.message : "网站生成失败" }
+        }
       }
       await delay(480)
       try {

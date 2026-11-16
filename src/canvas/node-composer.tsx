@@ -34,10 +34,15 @@ export interface CanvasNodeComposerProps {
   /** Patch the shared draft. Values are plain strings (params passthrough). */
   onPatch: (patch: Record<string, string>) => void;
   modelOptions: Array<{ id: string; name: string }>;
-  /** Model-specific aspect ratios; falls back to G2 set when empty. */
+  /** Model-specific aspect ratios; falls back to the built-in set when empty unless lockOptionsToCatalog. */
   aspectRatioOptions?: string[];
-  /** Model-specific image sizes; falls back to G2 set when empty. */
+  /** Model-specific image sizes; falls back to the built-in set when empty unless lockOptionsToCatalog. */
   imageSizeOptions?: string[];
+  /** When true, do not invent fallback sizes or ratios. */
+  lockOptionsToCatalog?: boolean;
+  previewOnly?: boolean;
+  catalogMessage?: string | null;
+  maxGenerationCount?: number;
   /** When "video", the composer shows duration and resolution instead of image size. */
   mediaType?: "image" | "video";
   resolutionOptions?: string[];
@@ -194,6 +199,10 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
   generationError,
   onGenerate,
   onCancel,
+  lockOptionsToCatalog = false,
+  previewOnly = false,
+  catalogMessage = null,
+  maxGenerationCount,
 }: CanvasNodeComposerProps) {
   const rootRef = useRef<HTMLDivElement | null>(null);
   const cameraTriggerRef = useRef<HTMLButtonElement | null>(null);
@@ -280,13 +289,25 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
   const refsByAssetId = new Map(canvasImageAssets.map(asset => [asset.id, asset]));
   // 计数要把连线派生的参考图算进去——否则用户连了线却看到 "0"，正是本次要修的症状。
   const referenceCount = referenceRefs.length + edgeReferenceRefs.length;
-  const modelOptionsList = modelOptions.length > 0 ? modelOptions : [{ id: DEFAULT_MODEL_ID, name: DEFAULT_MODEL_ID }];
-  const modelName = modelOptionsList.find(item => item.id === fields.modelId)?.name || fields.modelId;
-  const ratioOptionsList = aspectRatioOptions?.length ? aspectRatioOptions : [...ASPECT_RATIO_OPTIONS];
-  const sizeOptionsList = imageSizeOptions?.length ? imageSizeOptions : [...IMAGE_SIZE_OPTIONS];
+  const modelOptionsList = lockOptionsToCatalog || modelOptions.length > 0
+    ? modelOptions
+    : [{ id: DEFAULT_MODEL_ID, name: DEFAULT_MODEL_ID }];
+  const modelName = modelOptionsList.find(item => item.id === fields.modelId)?.name || fields.modelId || '选择模型';
+  const ratioOptionsList = lockOptionsToCatalog
+    ? (aspectRatioOptions ?? [])
+    : (aspectRatioOptions?.length ? aspectRatioOptions : [...ASPECT_RATIO_OPTIONS]);
+  const sizeOptionsList = lockOptionsToCatalog
+    ? (imageSizeOptions ?? [])
+    : (imageSizeOptions?.length ? imageSizeOptions : [...IMAGE_SIZE_OPTIONS]);
   const isVideo = mediaType === 'video';
-  const resolutionOptionsList = resolutionOptions?.length ? resolutionOptions : ['720p', '1080p'];
-  const durationOptionsList = durationOptions?.length ? durationOptions : ['4', '6', '8', '10'];
+  const resolutionOptionsList = lockOptionsToCatalog
+    ? (resolutionOptions ?? [])
+    : (resolutionOptions?.length ? resolutionOptions : ['720p', '1080p']);
+  const durationOptionsList = lockOptionsToCatalog
+    ? (durationOptions ?? [])
+    : (durationOptions?.length ? durationOptions : ['4', '6', '8', '10']);
+  const showCountChip = (maxGenerationCount ?? 4) > 1;
+  const sizeChipOptions = isVideo ? resolutionOptionsList : sizeOptionsList;
 
   return (
     <div
@@ -297,6 +318,14 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
       style={GENERATION_COMPOSER_SURFACE_STYLE}
       onMouseDown={event => event.stopPropagation()}
     >
+      {previewOnly ? (
+        <div className="mb-2 text-[10px] leading-4 text-amber-200/90">本地预览，尚未接通网站模型</div>
+      ) : lockOptionsToCatalog ? (
+        <div className="mb-2 text-[10px] leading-4 text-text-secondary">生成将按网站规则计费</div>
+      ) : null}
+      {catalogMessage ? (
+        <div className="mb-2 text-[10px] leading-4 text-status-error" role="alert">{catalogMessage}</div>
+      ) : null}
       {/* Top: reference / camera / style */}
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <button
@@ -417,33 +446,37 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
         >
           <span className="truncate">{modelName}</span>
         </button>
-        <button
-          ref={sizeTriggerRef}
-          type="button"
-          disabled={isGenerating}
-          title={isVideo ? '分辨率' : '图片尺寸'}
-          className={cn(GENERATION_CHIP, openPopover === 'size' && GENERATION_CHIP_ACTIVE)}
-          onClick={event => {
-            event.stopPropagation();
-            openPopoverFor(sizeTriggerRef.current, 'size', true);
-          }}
-        >
-          {isVideo ? fields.resolution : fields.imageSize}
-        </button>
-        <button
-          ref={ratioTriggerRef}
-          type="button"
-          disabled={isGenerating}
-          title="画面比例"
-          className={cn(GENERATION_CHIP, openPopover === 'ratio' && GENERATION_CHIP_ACTIVE)}
-          onClick={event => {
-            event.stopPropagation();
-            openPopoverFor(ratioTriggerRef.current, 'ratio', true);
-          }}
-        >
-          {fields.aspectRatio}
-        </button>
-        {isVideo ? (
+        {sizeChipOptions.length ? (
+          <button
+            ref={sizeTriggerRef}
+            type="button"
+            disabled={isGenerating}
+            title={isVideo ? '分辨率' : '图片尺寸'}
+            className={cn(GENERATION_CHIP, openPopover === 'size' && GENERATION_CHIP_ACTIVE)}
+            onClick={event => {
+              event.stopPropagation();
+              openPopoverFor(sizeTriggerRef.current, 'size', true);
+            }}
+          >
+            {isVideo ? fields.resolution : fields.imageSize}
+          </button>
+        ) : null}
+        {ratioOptionsList.length ? (
+          <button
+            ref={ratioTriggerRef}
+            type="button"
+            disabled={isGenerating}
+            title="画面比例"
+            className={cn(GENERATION_CHIP, openPopover === 'ratio' && GENERATION_CHIP_ACTIVE)}
+            onClick={event => {
+              event.stopPropagation();
+              openPopoverFor(ratioTriggerRef.current, 'ratio', true);
+            }}
+          >
+            {fields.aspectRatio}
+          </button>
+        ) : null}
+        {isVideo && durationOptionsList.length ? (
           <button
             type="button"
             disabled={isGenerating}
@@ -459,21 +492,23 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
             {fields.durationSeconds || '4'}s
           </button>
         ) : null}
-        <button
-          type="button"
-          disabled={isGenerating}
-          title={isVideo ? '生成条数（点击切换 1 / 2 / 4）' : '生成张数（点击切换 1 / 2 / 4）'}
-          className={GENERATION_CHIP}
-          onClick={event => {
-            event.stopPropagation();
-            const order = [1, 2, 4] as const;
-            const idx = order.indexOf(count as 1 | 2 | 4);
-            const next = order[(idx + 1) % order.length];
-            patch({ generationCount: next });
-          }}
-        >
-          {count}x
-        </button>
+        {showCountChip ? (
+          <button
+            type="button"
+            disabled={isGenerating}
+            title={isVideo ? '生成条数（点击切换 1 / 2 / 4）' : '生成张数（点击切换 1 / 2 / 4）'}
+            className={GENERATION_CHIP}
+            onClick={event => {
+              event.stopPropagation();
+              const order = [1, 2, 4].filter(value => value <= (maxGenerationCount ?? 4));
+              const idx = order.indexOf(Number(count) || 1);
+              const next = order[(idx + 1) % order.length] || order[0] || 1;
+              patch({ generationCount: next });
+            }}
+          >
+            {count}x
+          </button>
+        ) : null}
         {isGenerating ? (
           <button
             type="button"
@@ -489,7 +524,7 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
           <button
             type="button"
             disabled={!canRun}
-            title={runDisabledReason ?? `Run (${count})`}
+            title={runDisabledReason ?? (previewOnly ? `本地预览 (${count})` : `生成将按网站规则计费 (${count})`)}
             className={GENERATION_BTN_PRIMARY}
             onClick={event => {
               event.stopPropagation();

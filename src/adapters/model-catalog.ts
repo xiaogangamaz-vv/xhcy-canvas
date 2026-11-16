@@ -29,6 +29,7 @@ export type CanvasPublicImageModel = {
   supportsAspectRatio: boolean
   supportedAspectRatios: string[]
   supportedImageSizes: string[]
+  maxGenerationCount?: number
 }
 
 export type CanvasImageModelCatalog = {
@@ -38,6 +39,8 @@ export type CanvasImageModelCatalog = {
   channelReady: boolean
   unavailableCode: "IMAGE_CHANNEL_NOT_CONFIGURED" | null
   unavailableMessage: string | null
+  source?: "mock" | "site"
+  previewOnly?: boolean
 }
 
 export type CanvasPublicVideoModel = {
@@ -48,6 +51,10 @@ export type CanvasPublicVideoModel = {
   supportedAspectRatios?: string[]
   supportedResolutions?: string[]
   supportedDurations?: string[]
+  requiresImage?: boolean
+  minDuration?: number
+  maxDuration?: number
+  maxGenerationCount?: number
 }
 
 export type CanvasVideoModelCatalog = {
@@ -57,6 +64,8 @@ export type CanvasVideoModelCatalog = {
   channelReady: boolean
   unavailableCode: "VIDEO_CHANNEL_NOT_CONFIGURED" | null
   unavailableMessage: string | null
+  source?: "mock" | "site"
+  previewOnly?: boolean
 }
 
 const IMAGE_MODELS: CanvasPublicImageModel[] = [
@@ -144,6 +153,8 @@ export function listMockImageModels(): CanvasImageModelCatalog {
     channelReady: IMAGE_MODELS.length > 0,
     unavailableCode: IMAGE_MODELS.length > 0 ? null : "IMAGE_CHANNEL_NOT_CONFIGURED",
     unavailableMessage: IMAGE_MODELS.length > 0 ? null : "图片通道未配置 / 暂不可用",
+    source: "mock",
+    previewOnly: true,
   }
 }
 
@@ -155,6 +166,8 @@ export function listMockVideoModels(): CanvasVideoModelCatalog {
     channelReady: VIDEO_MODELS.length > 0,
     unavailableCode: VIDEO_MODELS.length > 0 ? null : "VIDEO_CHANNEL_NOT_CONFIGURED",
     unavailableMessage: VIDEO_MODELS.length > 0 ? null : "视频通道未配置 / 暂不可用",
+    source: "mock",
+    previewOnly: true,
   }
 }
 
@@ -163,9 +176,15 @@ export function resolveImageModelOptions(
   modelId: string | undefined,
 ): { aspectRatios: string[]; imageSizes: string[] } {
   const model = models.find(item => item.id === modelId)
+  if (model) {
+    return {
+      aspectRatios: model.supportedAspectRatios ?? [],
+      imageSizes: model.supportedImageSizes ?? [],
+    }
+  }
   return {
-    aspectRatios: model?.supportedAspectRatios?.length ? model.supportedAspectRatios : [...DEFAULT_IMAGE_ASPECT_RATIOS],
-    imageSizes: model?.supportedImageSizes?.length ? model.supportedImageSizes : [...DEFAULT_IMAGE_SIZES],
+    aspectRatios: [...DEFAULT_IMAGE_ASPECT_RATIOS],
+    imageSizes: [...DEFAULT_IMAGE_SIZES],
   }
 }
 
@@ -174,10 +193,17 @@ export function resolveVideoModelOptions(
   modelId: string | undefined,
 ): { aspectRatios: string[]; resolutions: string[]; durations: string[] } {
   const model = models.find(item => item.id === modelId)
+  if (model) {
+    return {
+      aspectRatios: model.supportedAspectRatios ?? [],
+      resolutions: model.supportedResolutions ?? [],
+      durations: model.supportedDurations ?? [],
+    }
+  }
   return {
-    aspectRatios: model?.supportedAspectRatios?.length ? model.supportedAspectRatios : [...DEFAULT_VIDEO_ASPECT_RATIOS],
-    resolutions: model?.supportedResolutions?.length ? model.supportedResolutions : [...DEFAULT_VIDEO_RESOLUTIONS],
-    durations: model?.supportedDurations?.length ? model.supportedDurations : [...DEFAULT_VIDEO_DURATIONS],
+    aspectRatios: [...DEFAULT_VIDEO_ASPECT_RATIOS],
+    resolutions: [...DEFAULT_VIDEO_RESOLUTIONS],
+    durations: [...DEFAULT_VIDEO_DURATIONS],
   }
 }
 
