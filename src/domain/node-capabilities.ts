@@ -164,7 +164,7 @@ export const CANVAS_NODE_CAPABILITY_CATALOG = {
       layout: "list",
       note: "",
     },
-    quickAdd: false,
+    quickAdd: true,
     connections: deriveConnectionCapabilities("storyboard"),
   },
   generation: {
@@ -174,7 +174,7 @@ export const CANVAS_NODE_CAPABILITY_CATALOG = {
     defaultSize: { width: 380, height: 420 },
     defaultParams: {
       moduleKey: "text-to-image",
-      modelId: "mock-v1",
+      modelId: "",
       mediaType: "image",
       durationSeconds: "4",
       prompt: "",
@@ -204,7 +204,7 @@ export const CANVAS_NODE_CAPABILITY_CATALOG = {
       document: "",
       activeShotId: "",
     },
-    quickAdd: false,
+    quickAdd: true,
     connections: deriveConnectionCapabilities("previs"),
   },
 } satisfies Record<CanvasNodeType, CanvasNodeCapability>

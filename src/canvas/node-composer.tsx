@@ -38,6 +38,10 @@ export interface CanvasNodeComposerProps {
   aspectRatioOptions?: string[];
   /** Model-specific image sizes; falls back to G2 set when empty. */
   imageSizeOptions?: string[];
+  /** When "video", the composer shows duration and resolution instead of image size. */
+  mediaType?: "image" | "video";
+  resolutionOptions?: string[];
+  durationOptions?: string[];
   referenceRefs: CanvasAssetRef[];
   /**
    * 从连线派生的参考图（不持久化，见 domain/canvas-edge-references.ts）。
@@ -103,6 +107,8 @@ interface ComposerFields {
   stylePreset: string | null;
   aspectRatio: string;
   imageSize: string;
+  resolution: string;
+  durationSeconds: string;
   generationCount: number;
 }
 
@@ -120,6 +126,8 @@ function toComposerFields(draft: Record<string, string>): ComposerFields {
     stylePreset: stringField(draft, 'stylePreset') || null,
     aspectRatio: stringField(draft, 'aspectRatio', 'auto'),
     imageSize: stringField(draft, 'imageSize', '2K'),
+    resolution: stringField(draft, 'resolution', '720p'),
+    durationSeconds: stringField(draft, 'durationSeconds', '4'),
     generationCount: Number.isFinite(count) ? Math.min(4, Math.max(1, Math.floor(count))) : 1,
   };
 }
@@ -131,6 +139,8 @@ function fieldsEqual(left: ComposerFields, right: ComposerFields): boolean {
     && left.stylePreset === right.stylePreset
     && left.aspectRatio === right.aspectRatio
     && left.imageSize === right.imageSize
+    && left.resolution === right.resolution
+    && left.durationSeconds === right.durationSeconds
     && left.generationCount === right.generationCount;
 }
 
@@ -170,6 +180,9 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
   modelOptions,
   aspectRatioOptions,
   imageSizeOptions,
+  mediaType = 'image',
+  resolutionOptions,
+  durationOptions,
   referenceRefs,
   edgeReferenceRefs = EMPTY_DERIVED_REFS,
   unusableUpstreamCount = 0,
@@ -271,6 +284,9 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
   const modelName = modelOptionsList.find(item => item.id === fields.modelId)?.name || fields.modelId;
   const ratioOptionsList = aspectRatioOptions?.length ? aspectRatioOptions : [...ASPECT_RATIO_OPTIONS];
   const sizeOptionsList = imageSizeOptions?.length ? imageSizeOptions : [...IMAGE_SIZE_OPTIONS];
+  const isVideo = mediaType === 'video';
+  const resolutionOptionsList = resolutionOptions?.length ? resolutionOptions : ['720p', '1080p'];
+  const durationOptionsList = durationOptions?.length ? durationOptions : ['4', '6', '8', '10'];
 
   return (
     <div
@@ -294,7 +310,7 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
           }}
         >
           <ImagePlus className="h-3 w-3 shrink-0" strokeWidth={2.4} />
-          参考图
+          {isVideo ? '参考素材' : '参考图'}
           {referenceCount > 0 ? (
             <span className="rounded-full bg-white/15 px-1.5 text-[10px] leading-4 text-white/80">{referenceCount}</span>
           ) : null}
@@ -405,14 +421,14 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
           ref={sizeTriggerRef}
           type="button"
           disabled={isGenerating}
-          title="分辨率"
+          title={isVideo ? '分辨率' : '图片尺寸'}
           className={cn(GENERATION_CHIP, openPopover === 'size' && GENERATION_CHIP_ACTIVE)}
           onClick={event => {
             event.stopPropagation();
             openPopoverFor(sizeTriggerRef.current, 'size', true);
           }}
         >
-          {fields.imageSize}
+          {isVideo ? fields.resolution : fields.imageSize}
         </button>
         <button
           ref={ratioTriggerRef}
@@ -427,10 +443,26 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
         >
           {fields.aspectRatio}
         </button>
+        {isVideo ? (
+          <button
+            type="button"
+            disabled={isGenerating}
+            title="时长（秒）"
+            className={GENERATION_CHIP}
+            onClick={event => {
+              event.stopPropagation();
+              const idx = durationOptionsList.indexOf(fields.durationSeconds);
+              const next = durationOptionsList[(idx + 1) % durationOptionsList.length] || durationOptionsList[0];
+              patch({ durationSeconds: next });
+            }}
+          >
+            {fields.durationSeconds || '4'}s
+          </button>
+        ) : null}
         <button
           type="button"
           disabled={isGenerating}
-          title="生成张数（点击切换 1 / 2 / 4）"
+          title={isVideo ? '生成条数（点击切换 1 / 2 / 4）' : '生成张数（点击切换 1 / 2 / 4）'}
           className={GENERATION_CHIP}
           onClick={event => {
             event.stopPropagation();
@@ -564,15 +596,15 @@ export const CanvasNodeComposer = memo(function CanvasNodeComposer({
           style={{ left: popoverAnchor.left, top: popoverAnchor.top, transform: 'translateX(-50%)' }}
           onMouseDown={event => event.stopPropagation()}
         >
-          <div className={cn('mb-1.5 px-1', GENERATION_MUTED)}>分辨率</div>
+          <div className={cn('mb-1.5 px-1', GENERATION_MUTED)}>{isVideo ? '分辨率' : '图片尺寸'}</div>
           <div className="flex flex-col gap-1">
-            {sizeOptionsList.map(size => (
+            {(isVideo ? resolutionOptionsList : sizeOptionsList).map(size => (
               <button
                 key={size}
                 type="button"
-                className={size === fields.imageSize ? GENERATION_POPOVER_OPTION_ACTIVE : GENERATION_POPOVER_OPTION}
+                className={(isVideo ? fields.resolution : fields.imageSize) === size ? GENERATION_POPOVER_OPTION_ACTIVE : GENERATION_POPOVER_OPTION}
                 onClick={() => {
-                  patch({ imageSize: size });
+                  patch(isVideo ? { resolution: size } : { imageSize: size });
                   closePopover();
                 }}
               >
