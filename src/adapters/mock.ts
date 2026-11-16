@@ -1,19 +1,27 @@
 import type { CanvasAsset, CanvasDocument, CanvasGenerationRequest, CanvasGenerationResult, HostPort } from "@/adapters/host"
 import { listMockImageModels, listMockVideoModels } from "@/adapters/model-catalog"
-import type { CanvasAssetKind } from "@/domain/types"
+import { renderPlaceholderDataUrl, renderPlaceholderVideo } from "@/adapters/mock-preview"
+import type { CanvasAssetKind, CanvasNode } from "@/domain/types"
+import {
+  blobToDataUrl,
+  blobToObjectUrl,
+  dataUrlToBlob,
+  getCachedMedia,
+  isEphemeralMediaUrl,
+  putCachedMedia,
+} from "@/lib/media-cache"
 
 export const MOCK_PROJECT_ID = "local-project"
 export const MOCK_CANVAS_ID = "local-canvas"
 export const MOCK_OWNER_ID = "local"
 export const MOCK_STORAGE_KEY = "xhcy-canvas.document"
+const SMALL_DATA_URL_LIMIT = 350_000
 
 function now() {
   return Date.now()
 }
 
 export function createEmptyDocument(): CanvasDocument {
-  const timestamp = now()
-  void timestamp
   return {
     id: MOCK_CANVAS_ID,
     projectId: MOCK_PROJECT_ID,
@@ -58,125 +66,182 @@ function kindFromFile(file: File): CanvasAssetKind {
   return "image"
 }
 
-function parseAspect(ratio: string | undefined, fallback: { w: number; h: number }): { w: number; h: number } {
-  const raw = (ratio || "").trim().toLowerCase()
-  if (!raw || raw === "auto") return fallback
-  const [a, b] = raw.split(":").map(Number)
-  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return fallback
-  return { w: a, h: b }
+function persistableUrl(url: string | null | undefined): string | null {
+  if (!url || isEphemeralMediaUrl(url)) return null
+  if (url.startsWith("data:") && url.length > SMALL_DATA_URL_LIMIT) return null
+  return url
 }
 
-function placeholderSize(request: CanvasGenerationRequest): { width: number; height: number } {
-  if (request.mediaType === "video") {
-    const long = request.resolution === "1080p" ? 960 : 640
-    const { w, h } = parseAspect(request.aspectRatio, { w: 16, h: 9 })
-    return w >= h
-      ? { width: long, height: Math.max(180, Math.round((long * h) / w)) }
-      : { width: Math.max(180, Math.round((long * w) / h)), height: long }
+function cacheKeyForAsset(asset: CanvasAsset): string {
+  return asset.storageKey || asset.id
+}
+
+async function cacheAssetBytes(asset: CanvasAsset, blob: Blob, name?: string): Promise<CanvasAsset> {
+  const key = cacheKeyForAsset(asset)
+  await putCachedMedia({ id: key, blob, mimeType: asset.mimeType || blob.type, name: name || asset.title })
+  const previewUrl = blobToObjectUrl(blob)
+  const canEmbed = blob.type.startsWith("image/") && blob.size <= SMALL_DATA_URL_LIMIT
+  let embedded: string | null = null
+  if (canEmbed) {
+    try { embedded = await blobToDataUrl(blob) } catch { embedded = null }
   }
-  const long = request.imageSize === "4K" ? 1024 : request.imageSize === "1K" ? 512 : 768
-  const { w, h } = parseAspect(request.aspectRatio, { w: 1, h: 1 })
-  return w >= h
-    ? { width: long, height: Math.max(180, Math.round((long * h) / w)) }
-    : { width: Math.max(180, Math.round((long * w) / h)), height: long }
+  return {
+    ...asset,
+    url: previewUrl,
+    storageKey: key,
+    mimeType: asset.mimeType || blob.type || asset.mimeType,
+    size: blob.size,
+    metadata: { ...asset.metadata, cache: "idb", name: name || asset.title },
+    ...(embedded ? { metadata: { ...asset.metadata, cache: "idb", name: name || asset.title, fallbackDataUrl: embedded } } : {}),
+  }
 }
 
-function wrapText(context: CanvasRenderingContext2D, text: string, maxWidth: number, maxLines: number): string[] {
-  const words = text.split(/\s+/).filter(Boolean)
-  const lines: string[] = []
-  let current = ""
-  for (const word of words) {
-    const next = current ? `${current} ${word}` : word
-    if (context.measureText(next).width <= maxWidth) {
-      current = next
+function compactMetadata(metadata: Record<string, unknown>): Record<string, unknown> {
+  const next: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(metadata || {})) {
+    if (typeof value === "string" && value.startsWith("data:") && (key !== "fallbackDataUrl" || value.length > SMALL_DATA_URL_LIMIT)) {
+      if (key === "fallbackDataUrl" && value.length > SMALL_DATA_URL_LIMIT) continue
+      if (key !== "fallbackDataUrl") continue
+    }
+    next[key] = value
+  }
+  return next
+}
+
+function sanitizeAsset(asset: CanvasAsset): CanvasAsset {
+  const metadata = compactMetadata(asset.metadata || {})
+  const fallback = typeof metadata.fallbackDataUrl === "string" ? metadata.fallbackDataUrl : null
+  return {
+    ...asset,
+    url: persistableUrl(asset.url) || (fallback && fallback.length <= SMALL_DATA_URL_LIMIT ? fallback : null),
+    metadata,
+  }
+}
+
+function sanitizeNode(node: CanvasNode): CanvasNode {
+  const params = { ...(node.params as Record<string, string>) }
+  for (const key of ["url", "mediaUrl", "posterUrl"]) {
+    if (key in params) params[key] = persistableUrl(params[key]) || ""
+  }
+  return {
+    ...node,
+    params,
+    assetRefs: node.assetRefs.map(ref => ({ ...ref, url: persistableUrl(ref.url) })),
+  } as CanvasNode
+}
+
+function sanitizeDocument(document: CanvasDocument): CanvasDocument {
+  return {
+    ...document,
+    assets: document.assets.map(sanitizeAsset),
+    nodes: document.nodes.map(sanitizeNode),
+  }
+}
+
+function assignNodeMediaUrl(node: CanvasNode, asset: CanvasAsset): CanvasNode {
+  const params = { ...(node.params as Record<string, string>) }
+  if ("url" in params || node.type === "image" || node.type === "video" || node.type === "audio") {
+    params.url = asset.url || params.url || ""
+  }
+  if ("mediaUrl" in params || node.type === "scene" || node.type === "character") {
+    if (node.assetRefs.some(ref => ref.assetId === asset.id) || params.mediaUrl) {
+      // fill only when this node already points at the asset or has a dead media url
+      const metaId = (() => {
+        try {
+          const raw = params.mediaMeta ? JSON.parse(params.mediaMeta) as { assetId?: string } : null
+          return raw?.assetId || ""
+        } catch {
+          return ""
+        }
+      })()
+      if (metaId === asset.id || node.assetRefs.some(ref => ref.assetId === asset.id) || isEphemeralMediaUrl(params.mediaUrl) || !params.mediaUrl) {
+        if (metaId === asset.id || node.assetRefs.some(ref => ref.assetId === asset.id)) {
+          params.mediaUrl = asset.url || params.mediaUrl || ""
+        }
+      }
+    }
+  }
+  const resultAssetId = params.resultAssetId
+  return {
+    ...node,
+    params,
+    assetRefs: node.assetRefs.map(ref => ref.assetId === asset.id ? { ...ref, url: asset.url } : { ...ref, url: isEphemeralMediaUrl(ref.url) ? null : ref.url }),
+  } as CanvasNode
+}
+
+async function hydrateDocument(document: CanvasDocument): Promise<CanvasDocument> {
+  const assets: CanvasAsset[] = []
+  for (const asset of document.assets) {
+    const key = cacheKeyForAsset(asset)
+    const cached = await getCachedMedia(key)
+    if (cached?.blob) {
+      assets.push({
+        ...asset,
+        url: blobToObjectUrl(cached.blob),
+        mimeType: asset.mimeType || cached.mimeType,
+        storageKey: key,
+      })
       continue
     }
-    if (current) lines.push(current)
-    current = word
-    if (lines.length >= maxLines) break
+    const fallback = typeof asset.metadata?.fallbackDataUrl === "string" ? asset.metadata.fallbackDataUrl : null
+    if (fallback) {
+      try {
+        const blob = await dataUrlToBlob(fallback)
+        await putCachedMedia({ id: key, blob, mimeType: blob.type || asset.mimeType || "image/png", name: asset.title })
+        assets.push({ ...asset, url: blobToObjectUrl(blob), storageKey: key })
+        continue
+      } catch {
+        assets.push({ ...asset, url: fallback })
+        continue
+      }
+    }
+    if (asset.url && asset.url.startsWith("data:")) {
+      try {
+        const blob = await dataUrlToBlob(asset.url)
+        await putCachedMedia({ id: key, blob, mimeType: blob.type || asset.mimeType || "application/octet-stream", name: asset.title })
+        assets.push({ ...asset, url: blobToObjectUrl(blob), storageKey: key })
+        continue
+      } catch {
+        assets.push(asset)
+        continue
+      }
+    }
+    assets.push({
+      ...asset,
+      url: isEphemeralMediaUrl(asset.url) ? null : asset.url,
+    })
   }
-  if (current && lines.length < maxLines) lines.push(current)
-  if (lines.length === maxLines && words.join(" ").length > lines.join(" ").length) {
-    const last = lines[maxLines - 1]
-    lines[maxLines - 1] = last.slice(0, Math.max(1, last.length - 1)) + "…"
-  }
-  return lines.length ? lines : [text.slice(0, 40)]
-}
 
-function renderPlaceholderDataUrl(request: CanvasGenerationRequest): { dataUrl: string; width: number; height: number } {
-  const { width, height } = placeholderSize(request)
-  const canvas = document.createElement("canvas")
-  canvas.width = width
-  canvas.height = height
-  const context = canvas.getContext("2d")
-  if (!context) {
-    throw new Error("无法创建预览画布")
-  }
-  const gradient = context.createLinearGradient(0, 0, width, height)
-  if (request.mediaType === "video") {
-    gradient.addColorStop(0, "#1a1518")
-    gradient.addColorStop(1, "#2a2230")
-  } else {
-    gradient.addColorStop(0, "#181715")
-    gradient.addColorStop(1, "#2a2622")
-  }
-  context.fillStyle = gradient
-  context.fillRect(0, 0, width, height)
-  context.strokeStyle = "rgba(245,245,244,0.18)"
-  context.lineWidth = 2
-  context.strokeRect(16, 16, width - 32, height - 32)
-
-  context.fillStyle = "rgba(245,245,244,0.88)"
-  context.font = `600 ${Math.max(18, Math.round(width / 22))}px ui-sans-serif, system-ui, sans-serif`
-  context.fillText(request.mediaType === "video" ? "Video Generator" : "Image Generator", 32, 56)
-
-  context.fillStyle = "rgba(245,245,244,0.55)"
-  context.font = `${Math.max(12, Math.round(width / 36))}px ui-sans-serif, system-ui, sans-serif`
-  const meta = request.mediaType === "video"
-    ? `${request.modelName || request.modelId}  ·  ${request.aspectRatio || "16:9"}  ·  ${request.resolution || "720p"}  ·  ${request.durationSeconds || "4"}s`
-    : `${request.modelName || request.modelId}  ·  ${request.aspectRatio || "auto"}  ·  ${request.imageSize || "2K"}`
-  context.fillText(meta, 32, 82)
-
-  context.fillStyle = "rgba(245,245,244,0.82)"
-  context.font = `${Math.max(16, Math.round(width / 28))}px ui-sans-serif, system-ui, sans-serif`
-  const prompt = (request.prompt || "未填写提示词").trim()
-  const lines = wrapText(context, prompt, width - 64, 5)
-  lines.forEach((line, index) => {
-    context.fillText(line, 32, 130 + index * Math.max(24, Math.round(width / 24)))
+  const assetById = new Map(assets.map(asset => [asset.id, asset]))
+  const nodes = document.nodes.map(node => {
+    let next = node
+    for (const ref of node.assetRefs) {
+      const asset = assetById.get(ref.assetId)
+      if (asset) next = assignNodeMediaUrl(next, asset)
+    }
+    const params = next.params as Record<string, string>
+    const resultId = params.resultAssetId
+    if (resultId && assetById.get(resultId)) next = assignNodeMediaUrl(next, assetById.get(resultId)!)
+    try {
+      const raw = params.mediaMeta ? JSON.parse(params.mediaMeta) as { assetId?: string } : null
+      if (raw?.assetId && assetById.get(raw.assetId)) next = assignNodeMediaUrl(next, assetById.get(raw.assetId)!)
+    } catch {
+      // ignore malformed media meta
+    }
+    return next
   })
 
-  context.fillStyle = "rgba(245,245,244,0.4)"
-  context.font = `${Math.max(11, Math.round(width / 42))}px ui-sans-serif, system-ui, sans-serif`
-  context.fillText("Local mock preview", 32, height - 32)
-
-  if (request.mediaType === "video") {
-    const cx = width / 2
-    const cy = height / 2 + 16
-    const r = Math.min(width, height) / 10
-    context.beginPath()
-    context.arc(cx, cy, r, 0, Math.PI * 2)
-    context.fillStyle = "rgba(0,0,0,0.45)"
-    context.fill()
-    context.beginPath()
-    context.moveTo(cx - r * 0.25, cy - r * 0.4)
-    context.lineTo(cx - r * 0.25, cy + r * 0.4)
-    context.lineTo(cx + r * 0.45, cy)
-    context.closePath()
-    context.fillStyle = "rgba(245,245,244,0.9)"
-    context.fill()
-  }
-
-  return { dataUrl: canvas.toDataURL("image/png"), width, height }
+  return { ...document, assets, nodes }
 }
 
 function delay(ms: number) {
   return new Promise(resolve => window.setTimeout(resolve, ms))
 }
 
-function buildAsset(request: CanvasGenerationRequest, preview: { dataUrl: string; width: number; height: number }): CanvasAsset {
+async function cacheGenerationAsset(request: CanvasGenerationRequest): Promise<CanvasAsset> {
   const timestamp = now()
   const isVideo = request.mediaType === "video"
-  return {
+  const base: CanvasAsset = {
     id: crypto.randomUUID(),
     ownerId: MOCK_OWNER_ID,
     projectId: MOCK_PROJECT_ID,
@@ -185,13 +250,13 @@ function buildAsset(request: CanvasGenerationRequest, preview: { dataUrl: string
     source: "generation",
     sourceTable: isVideo ? "video_assets" : "image_assets",
     title: (request.prompt || (isVideo ? "Video preview" : "Image preview")).slice(0, 80),
-    mimeType: "image/png",
-    size: Math.round(preview.dataUrl.length * 0.75),
-    width: preview.width,
-    height: preview.height,
+    mimeType: isVideo ? "video/webm" : "image/png",
+    size: 0,
+    width: null,
+    height: null,
     duration: isVideo ? Number(request.durationSeconds || "4") || 4 : null,
     status: "active",
-    url: preview.dataUrl,
+    url: null,
     storageKey: null,
     metadata: {
       local: true,
@@ -203,12 +268,54 @@ function buildAsset(request: CanvasGenerationRequest, preview: { dataUrl: string
     updatedAt: timestamp,
     archivedAt: null,
   }
+
+  if (isVideo) {
+    try {
+      const video = await renderPlaceholderVideo(request)
+      const asset = await cacheAssetBytes({
+        ...base,
+        mimeType: video.mimeType,
+        width: video.width,
+        height: video.height,
+        duration: video.duration,
+        metadata: { ...base.metadata, posterDataUrl: video.posterDataUrl, playable: true },
+      }, video.blob, base.title)
+      return asset
+    } catch (error) {
+      const preview = renderPlaceholderDataUrl(request)
+      const blob = await dataUrlToBlob(preview.dataUrl)
+      const asset = await cacheAssetBytes({
+        ...base,
+        type: "video",
+        mimeType: "image/png",
+        width: preview.width,
+        height: preview.height,
+        metadata: {
+          ...base.metadata,
+          playable: false,
+          posterOnly: true,
+          reason: error instanceof Error ? error.message : "本地视频封装失败",
+        },
+      }, blob, base.title)
+      return asset
+    }
+  }
+
+  const preview = renderPlaceholderDataUrl(request)
+  const blob = await dataUrlToBlob(preview.dataUrl)
+  return cacheAssetBytes({
+    ...base,
+    mimeType: "image/png",
+    width: preview.width,
+    height: preview.height,
+  }, blob, base.title)
 }
 
 export function createMockHost(): HostPort {
   return {
     async loadDocument() {
-      return readStoredDocument() ?? createEmptyDocument()
+      const stored = readStoredDocument() ?? createEmptyDocument()
+      return hydrateDocument(stored)
     },
     async saveDocument(document) {
       const next: CanvasDocument = {
@@ -217,13 +324,20 @@ export function createMockHost(): HostPort {
         projectId: document.projectId || MOCK_PROJECT_ID,
         revision: (document.revision ?? 0) + 1,
       }
-      writeStoredDocument(next)
+      try {
+        writeStoredDocument(sanitizeDocument(next))
+      } catch {
+        writeStoredDocument(sanitizeDocument({
+          ...next,
+          assets: next.assets.map(asset => ({ ...sanitizeAsset(asset), url: null })),
+        }))
+      }
       return next
     },
     async uploadAsset(file) {
       const kind = kindFromFile(file)
       const timestamp = now()
-      const asset: CanvasAsset = {
+      const draft: CanvasAsset = {
         id: crypto.randomUUID(),
         ownerId: MOCK_OWNER_ID,
         projectId: MOCK_PROJECT_ID,
@@ -238,14 +352,14 @@ export function createMockHost(): HostPort {
         height: null,
         duration: null,
         status: "active",
-        url: URL.createObjectURL(file),
+        url: null,
         storageKey: null,
         metadata: { name: file.name, local: true },
         createdAt: timestamp,
         updatedAt: timestamp,
         archivedAt: null,
       }
-      return asset
+      return cacheAssetBytes(draft, file, file.name)
     },
     async listImageModels() {
       return listMockImageModels()
@@ -261,12 +375,10 @@ export function createMockHost(): HostPort {
       if (!request.modelId) {
         return { status: "failed", message: "请选择一个模型" }
       }
-      // A short, bounded delay so the running state is visible, then a local preview.
       await delay(480)
       try {
-        const preview = renderPlaceholderDataUrl(request)
-        const asset = buildAsset(request, preview)
-        return { status: "succeeded", asset, previewUrl: preview.dataUrl }
+        const asset = await cacheGenerationAsset(request)
+        return { status: "succeeded", asset, previewUrl: asset.url || undefined }
       } catch (error) {
         return { status: "failed", message: error instanceof Error ? error.message : "预览生成失败" }
       }

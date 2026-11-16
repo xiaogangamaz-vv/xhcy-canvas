@@ -5,6 +5,7 @@ import type { CanvasNodeRenderer } from "@/canvas/node-registry"
 import {
   canvasSurfaceStyle,
 } from "@/canvas/canvas-palette"
+import { mediaLooksLikeVideo } from "@/lib/media-cache"
 import { cn } from "@/lib/utils"
 
 export type CanvasGenerationNodeRenderer = Extract<CanvasNodeRenderer, "generation">
@@ -20,6 +21,7 @@ export type CanvasGenerationNodeRendererProps = {
   highlighted?: boolean
   connectable?: boolean
   resultPreviewUrl?: string | null
+  resultPreviewKind?: "image" | "video" | null
   taskStatus?: string | null
   onJumpToTasks?: () => void
   /** 该节点最新一次任务失败的原因（来自画布任务列表）。 */
@@ -41,6 +43,7 @@ function CanvasGenerationNodeRenderer({
   highlighted,
   connectable,
   resultPreviewUrl,
+  resultPreviewKind,
   taskStatus,
   onJumpToTasks,
   taskFailure,
@@ -86,14 +89,25 @@ function CanvasGenerationNodeRenderer({
           }}
         >
           {resultPreviewUrl ? (
-            <img
-              src={resultPreviewUrl}
-              alt=""
-              loading="lazy"
-              decoding="async"
-              className="h-full w-full object-cover"
-              draggable={false}
-            />
+            mediaLooksLikeVideo(resultPreviewUrl, null, resultPreviewKind) ? (
+              <video
+                src={resultPreviewUrl}
+                controls
+                playsInline
+                preload="metadata"
+                className="h-full w-full bg-black object-cover"
+              />
+            ) : (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={resultPreviewUrl}
+                alt=""
+                loading="lazy"
+                decoding="async"
+                className="h-full w-full object-cover"
+                draggable={false}
+              />
+            )
           ) : (
             <div className="flex h-full w-full items-center justify-center">
               {isBusy ? (

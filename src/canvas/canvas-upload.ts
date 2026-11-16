@@ -8,13 +8,13 @@ export type CanvasUploadResult = {
   rejected: CanvasUploadRejection[]
 }
 
-export const CANVAS_UPLOAD_ACCEPT = "image/*,video/*"
+export const CANVAS_UPLOAD_ACCEPT = "image/*,video/*,audio/*"
 export const CANVAS_UPLOAD_MAX_FILES = 20
 
 export function isCanvasUploadableFile(file: File): boolean {
   const type = String(file.type || "").toLowerCase()
-  if (type.startsWith("image/") || type.startsWith("video/")) return true
-  return /\.(png|jpe?g|webp|gif|avif|heic|heif|bmp|mp4|webm|mov)$/i.test(file.name || "")
+  if (type.startsWith("image/") || type.startsWith("video/") || type.startsWith("audio/")) return true
+  return /\.(png|jpe?g|webp|gif|avif|heic|heif|bmp|mp4|webm|mov|mp3|wav|ogg|m4a)$/i.test(file.name || "")
 }
 
 export function nodeTypeFromAsset(asset: { type: string }): CanvasNodeType {

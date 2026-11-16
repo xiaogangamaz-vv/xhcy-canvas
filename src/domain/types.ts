@@ -286,6 +286,8 @@ export type CanvasGenerationNode = CanvasNodeBase & {
     stylePreset?: string
     generationCount?: string
     mode?: string
+    resultAssetId?: string
+    outputHistory?: string
   }
 }
 

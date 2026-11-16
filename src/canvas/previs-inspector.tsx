@@ -2,18 +2,17 @@ import { useMemo, useState } from "react"
 import { Redo2, Send, Undo2 } from "lucide-react"
 import type { CanvasNode } from "@/domain/types"
 import {
-  applyPrevisDocumentEdit,
+  applyPrevisPromptToDocument,
+  parsePrevisDraftDocument,
+  writePrevisDraftDocument,
+} from "@/canvas/previs-command"
+import {
   canRedoPrevisDocument,
   canRevertPrevisDocument,
-  createEmptyPrevisScene,
-  createPrevisDocument,
-  interpretPrevisCommand,
   previsDocumentScene,
   previsDocumentUndoLabel,
   redoPrevisDocument,
   revertPrevisDocument,
-  safeParsePrevisDocument,
-  type PrevisDocument,
 } from "@/previs"
 
 const PROMPT_EXAMPLES = [
@@ -28,88 +27,49 @@ export type CanvasPrevisInspectorProps = {
   node: CanvasNode
   draft: Record<string, string>
   setDraft: (draft: Record<string, string>) => void
+  preparingShotId?: string | null
+  shotMessage?: string | null
+  onPrepareShot?: (shotId: string) => void
 }
 
-function documentFromDraft(draft: Record<string, string>): PrevisDocument | null {
-  if (!draft.document || !draft.document.trim()) return null
-  try {
-    return safeParsePrevisDocument(JSON.parse(draft.document))
-  } catch {
-    return null
-  }
-}
-
-function writeDocument(document: PrevisDocument, draft: Record<string, string>, activeShotId?: string): Record<string, string> {
-  const scene = previsDocumentScene(document)
-  const shotId = activeShotId || scene.shots[0]?.id || ""
-  return {
-    ...draft,
-    document: JSON.stringify(document),
-    activeShotId: shotId,
-  }
-}
-
-export function CanvasPrevisInspector({ node, draft, setDraft }: CanvasPrevisInspectorProps) {
+export function CanvasPrevisInspector({
+  node,
+  draft,
+  setDraft,
+  preparingShotId,
+  shotMessage,
+  onPrepareShot,
+}: CanvasPrevisInspectorProps) {
   void node
-  const document = useMemo(() => documentFromDraft(draft), [draft])
+  const document = useMemo(() => parsePrevisDraftDocument(draft), [draft])
   const scene = useMemo(() => (document ? previsDocumentScene(document) : null), [document])
   const [prompt, setPrompt] = useState("")
   const [reply, setReply] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const applyCommand = (text: string) => {
-    const trimmed = text.trim()
-    if (!trimmed) {
-      setError("请输入要拍摄的场景或修改")
-      return
-    }
-    const current = document ?? createPrevisDocument(createEmptyPrevisScene())
-    const currentScene = previsDocumentScene(current)
-    const command = interpretPrevisCommand({ text: trimmed, scene: currentScene })
-    if (command.revertSteps > 0) {
-      let nextDoc = revertPrevisDocument(current, command.revertSteps)
-      if (command.ops.length > 0) {
-        const applied = applyPrevisDocumentEdit({ document: nextDoc, ops: command.ops, label: command.reply })
-        if (applied.issues.length > 0) {
-          setError(applied.issues.join("；"))
-          setReply(null)
-          return
-        }
-        nextDoc = applied.document
-      }
-      setDraft(writeDocument(nextDoc, draft))
-      setReply(command.reply)
-      setError(null)
-      setPrompt("")
-      return
-    }
-    if (!command.matched) {
-      setError(command.reply)
+    const result = applyPrevisPromptToDocument(document, text)
+    if (result.error) {
+      setError(result.error)
       setReply(null)
       return
     }
-    const applied = applyPrevisDocumentEdit({ document: current, ops: command.ops, label: command.reply })
-    if (applied.issues.length > 0) {
-      setError(applied.issues.join("；"))
-      setReply(null)
-      return
-    }
-    setDraft(writeDocument(applied.document, draft))
-    setReply(command.reply)
+    setDraft(writePrevisDraftDocument(result.document, draft))
+    setReply(result.reply)
     setError(null)
     setPrompt("")
   }
 
   const undo = () => {
     if (!document || !canRevertPrevisDocument(document)) return
-    setDraft(writeDocument(revertPrevisDocument(document), draft))
+    setDraft(writePrevisDraftDocument(revertPrevisDocument(document), draft))
     setReply(`已撤销：${previsDocumentUndoLabel(document) || "上一版编辑"}`)
     setError(null)
   }
 
   const redo = () => {
     if (!document || !canRedoPrevisDocument(document)) return
-    setDraft(writeDocument(redoPrevisDocument(document), draft))
+    setDraft(writePrevisDraftDocument(redoPrevisDocument(document), draft))
     setReply("已重做")
     setError(null)
   }
@@ -192,6 +152,7 @@ export function CanvasPrevisInspector({ node, draft, setDraft }: CanvasPrevisIns
 
       {reply ? <p className="text-[10px] text-text-secondary">{reply}</p> : null}
       {error ? <p role="alert" className="text-[10px] text-status-error">{error}</p> : null}
+      {shotMessage ? <p className="text-[10px] text-text-secondary">{shotMessage}</p> : null}
 
       {scene && scene.shots.length > 0 ? (
         <ul className="space-y-1">
@@ -201,7 +162,16 @@ export function CanvasPrevisInspector({ node, draft, setDraft }: CanvasPrevisIns
                 <span className="truncate">{shot.name}{shot.shotSize ? ` · ${shot.shotSize}` : ""}</span>
                 <span className="shrink-0 tabular-nums text-text-weak">{shot.durationSeconds}s</span>
               </div>
-              <p className="mt-1 text-[10px] text-text-weak">出片（连接生成节点）需要生成服务，本地预演只保留到这一步。</p>
+              {onPrepareShot ? (
+                <button
+                  type="button"
+                  className="mt-1.5 rounded-md bg-white/10 px-2 py-0.5 text-[10px] text-text-primary hover:bg-white/16 disabled:opacity-40"
+                  disabled={preparingShotId === shot.id}
+                  onClick={() => onPrepareShot(shot.id)}
+                >
+                  {preparingShotId === shot.id ? "准备中…" : `出片 · 生成镜头 ${shot.name}`}
+                </button>
+              ) : null}
             </li>
           ))}
         </ul>

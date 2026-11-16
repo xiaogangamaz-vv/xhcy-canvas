@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react"
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type MouseEvent as ReactMouseEvent, type ReactNode } from "react"
 import { createPortal } from "react-dom"
 import {
   Background,
@@ -22,6 +22,7 @@ import {
   type Node,
   type NodeChange,
   type NodeProps,
+  type OnConnectEnd,
   type OnConnectStart,
   type OnMoveEnd,
   type Viewport,
@@ -29,14 +30,18 @@ import {
 import {
   ImagePlus,
   Keyboard,
+  LayoutGrid,
   Map as MapIcon,
   Maximize2,
   Plus,
   Redo2,
+  Trash2,
   Undo2,
   Upload,
   Video as VideoIcon,
+  WandSparkles,
   X,
+  ZoomIn,
 } from "lucide-react"
 import type { CanvasDocument, HostPort } from "@/adapters/host"
 import type { CanvasImageModelCatalog, CanvasVideoModelCatalog } from "@/adapters/model-catalog"
@@ -65,6 +70,9 @@ import {
   splitCanvasUploadFiles,
   uploadCanvasMedia,
 } from "@/canvas/canvas-upload"
+import { CanvasPromptBar } from "@/canvas/canvas-prompt-bar"
+import { CanvasAssetLibrary } from "@/canvas/asset-library"
+import { CanvasMediaEmptyState, CANVAS_MEDIA_RENDERER_COMPONENTS } from "@/canvas/media-node-renderers"
 import {
   buildCanvasClipboard,
   canPasteCanvasClipboard,
@@ -76,7 +84,6 @@ import {
 import { canvasGroupMemberIds } from "@/canvas/group-membership"
 import { CANVAS_CHARACTER_RENDERER_COMPONENTS } from "@/canvas/character-node-renderer"
 import { CANVAS_GROUP_RENDERER_COMPONENTS } from "@/canvas/group-node-renderer"
-import { CANVAS_MEDIA_RENDERER_COMPONENTS } from "@/canvas/media-node-renderers"
 import { CanvasPlusHandle } from "@/canvas/node-handle"
 import {
   CANVAS_NODE_REGISTRY,
@@ -119,7 +126,24 @@ import {
 import { CanvasSceneStrip } from "@/canvas/scene-strip"
 import { nextCanvasScenePosition, nextCanvasSceneTitle, sortCanvasSceneEntries, type CanvasSceneSequenceEntry } from "@/canvas/scene-sequence"
 import { canvasScriptDocumentKind, parseCanvasStoryOutline, summarizeCanvasStoryOutline } from "@/canvas/script-outline"
-import { previsDocumentScene, safeParsePrevisDocument } from "@/previs"
+import {
+  applyPrevisPromptToDocument,
+  parsePrevisDraftDocument,
+  writePrevisDraftDocument,
+} from "@/canvas/previs-command"
+import { CanvasNodeOutputHistory } from "@/canvas/node-output-history"
+import { prependCanvasOutputHistory } from "@/canvas/output-history"
+import {
+  CanvasAudioInspector,
+  CanvasCharacterInspector,
+  CanvasMediaNodeInspector,
+  CanvasSceneInspector,
+} from "@/canvas/node-inspectors"
+import { renderPrevisShotPng, previsShotFileName } from "@/canvas/previs-shot-export"
+import { CanvasReferenceMenuPanel } from "@/canvas/reference-menu-panel"
+import type { CanvasReferenceSource } from "@/canvas/reference-menu"
+import { dataUrlToBlob, mediaLooksLikeVideo } from "@/lib/media-cache"
+import { previsDocumentScene, previsShotPrompt, safeParsePrevisDocument } from "@/previs"
 import { deriveCanvasUpstreamReferences } from "@/domain/edge-references"
 import { type TextEditorHandle } from "@/canvas/text-editor"
 import { CANVAS_TEXT_RENDERER_COMPONENTS } from "@/canvas/text-node-renderer"
@@ -152,6 +176,9 @@ type FlowNodeData = {
   composer?: CanvasNodeComposerConfig | null
   taskStatus?: CanvasNode["status"] | null
   resultPreviewUrl?: string | null
+  resultPreviewKind?: "image" | "video" | null
+  onAssignMedia?: (nodeId: string, files?: File[]) => void
+  onGenerateFromText?: (nodeId: string) => void
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -312,7 +339,7 @@ const REFERENCE_ACCEPT_KINDS_IMAGE = ["image"] as const
 const REFERENCE_ACCEPT_KINDS_VIDEO = ["image", "video", "audio"] as const
 const EMPTY_COMPOSER_REFS: CanvasNodeComposerConfig["referenceRefs"] = []
 
-function toFlowNode(node: CanvasNode, actions?: Pick<FlowNodeData, "onInlineSave" | "onDelete">): Node<FlowNodeData> {
+function toFlowNode(node: CanvasNode, actions?: Pick<FlowNodeData, "onInlineSave" | "onDelete" | "onAssignMedia" | "onGenerateFromText">): Node<FlowNodeData> {
   return {
     id: node.id,
     type: FLOW_NODE_TYPE,
@@ -324,6 +351,8 @@ function toFlowNode(node: CanvasNode, actions?: Pick<FlowNodeData, "onInlineSave
       rawNode: node,
       onInlineSave: actions?.onInlineSave,
       onDelete: actions?.onDelete,
+      onAssignMedia: actions?.onAssignMedia,
+      onGenerateFromText: actions?.onGenerateFromText,
     },
   }
 }
@@ -522,7 +551,8 @@ const CanvasNodeCard = memo(function CanvasNodeCard({ data, selected }: NodeProp
           selected={selected}
           highlighted={data.highlighted}
           connectable={data.connectable}
-          resultPreviewUrl={data.resultPreviewUrl || node.assetRefs[0]?.url || null}
+          resultPreviewUrl={data.resultPreviewUrl || null}
+          resultPreviewKind={data.resultPreviewKind || (resolvedGeneration.mediaType === "video" ? "video" : "image")}
           taskStatus={data.taskStatus || node.status}
           composer={selected && data.composer ? <CanvasNodeComposer nodeId={node.id} {...data.composer} /> : null}
         />
@@ -600,16 +630,41 @@ const CanvasNodeCard = memo(function CanvasNodeCard({ data, selected }: NodeProp
             <span className="truncate text-[11px] font-semibold text-text-primary">
               {node.title === CANVAS_NODE_REGISTRY.text.label || !node.title ? "Text Note" : node.title}
             </span>
-            <button
-              type="button"
-              className="nodrag rounded-md px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-surface-hover"
-              onClick={() => {
-                if (editing) void commitText(textDoc)
-                else setEditing(true)
-              }}
-            >
-              {editing ? "Done" : "Edit"}
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                className="nodrag rounded-md px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-surface-hover"
+                onClick={() => {
+                  if (editing) void commitText(textDoc)
+                  else setEditing(true)
+                }}
+              >
+                {editing ? "完成编辑" : "编辑内容"}
+              </button>
+              {data.onGenerateFromText ? (
+                <button
+                  type="button"
+                  className="nodrag inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-text-secondary hover:bg-surface-hover"
+                  title="以此文本生图"
+                  aria-label="以此文本生图"
+                  onClick={() => data.onGenerateFromText?.(node.id)}
+                >
+                  <WandSparkles className="h-3 w-3" />
+                  以此文本生图
+                </button>
+              ) : null}
+              {data.onDelete ? (
+                <button
+                  type="button"
+                  className="nodrag rounded-md p-0.5 text-text-secondary hover:text-status-error"
+                  title="删除节点"
+                  aria-label="删除节点"
+                  onClick={() => data.onDelete?.(node.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              ) : null}
+            </div>
           </div>
           {TextRenderer ? (
             <TextRenderer
@@ -628,7 +683,20 @@ const CanvasNodeCard = memo(function CanvasNodeCard({ data, selected }: NodeProp
         <div className="flex h-full w-full flex-col overflow-hidden rounded-2xl p-3" style={{ pointerEvents: "auto" }}>
           <div className="mb-2 flex items-center justify-between gap-2">
             <span className="truncate text-[11px] font-semibold text-text-primary">{node.title || nodeDefinition.label}</span>
-            <span className="rounded-full bg-surface-hover px-2 py-0.5 text-[10px] text-text-secondary">{nodeDefinition.label}</span>
+            <div className="flex items-center gap-1">
+              <span className="rounded-full bg-surface-hover px-2 py-0.5 text-[10px] text-text-secondary">{nodeDefinition.label}</span>
+              {data.onDelete ? (
+                <button
+                  type="button"
+                  className="nodrag rounded-md p-0.5 text-text-secondary hover:text-status-error"
+                  title="删除节点"
+                  aria-label="删除节点"
+                  onClick={() => data.onDelete?.(node.id)}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              ) : null}
+            </div>
           </div>
           {SceneRenderer ? (
             <SceneRenderer
@@ -649,6 +717,31 @@ const CanvasNodeCard = memo(function CanvasNodeCard({ data, selected }: NodeProp
               mediaKind={paramString(node.params, "mediaKind")}
               mediaMeta={paramString(node.params, "mediaMeta")}
             />
+          ) : node.type === "audio" ? (
+            mediaUrl ? (
+              <div className="flex flex-col gap-2">
+                <audio src={mediaUrl} controls className="w-full" />
+                {StandardRenderer ? (
+                  <StandardRenderer
+                    editing={editing}
+                    draft={draft}
+                    preview={String(preview || "")}
+                    title={node.title}
+                    error={error}
+                    textareaRef={textareaRef}
+                    onDraftChange={setDraft}
+                    onCommit={() => void commitStandard()}
+                    onCancel={() => { setEditing(false); setError(null) }}
+                  />
+                ) : null}
+              </div>
+            ) : (
+              <CanvasMediaEmptyState
+                kind="audio"
+                onPick={() => data.onAssignMedia?.(node.id)}
+                onDropFiles={files => data.onAssignMedia?.(node.id, files)}
+              />
+            )
           ) : StandardRenderer ? (
             <StandardRenderer
               editing={editing}
@@ -664,8 +757,13 @@ const CanvasNodeCard = memo(function CanvasNodeCard({ data, selected }: NodeProp
           ) : MediaRenderer && mediaUrl ? (
             <MediaRenderer url={mediaUrl} useThumbnail={data.useThumbnail} />
           ) : MediaRenderer ? (
-            <p className="text-xs text-text-weak">Drop an image or video onto the canvas</p>
+            <CanvasMediaEmptyState
+              kind={renderer === "video" ? "video" : "image"}
+              onPick={() => data.onAssignMedia?.(node.id)}
+              onDropFiles={files => data.onAssignMedia?.(node.id, files)}
+            />
           ) : (
+
             <p className={cn("whitespace-pre-wrap leading-5", preview && preview.length > 160 ? "line-clamp-7" : "")}>{String(preview || "")}</p>
           )}
           {StandardRenderer && !editing && data.onInlineSave ? (
@@ -754,7 +852,20 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   const [edges, setEdges] = useState<Edge[]>([])
   const [guides, setGuides] = useState<CanvasSnapGuides | null>(null)
   const [showMinimap, setShowMinimap] = useState(true)
+  const [backgroundMode, setBackgroundMode] = useState<"dots" | "lines" | "none">("dots")
   const [showHelp, setShowHelp] = useState(false)
+  const [assetLibraryOpen, setAssetLibraryOpen] = useState(false)
+  const [promptPending, setPromptPending] = useState(false)
+  const [promptReply, setPromptReply] = useState<string | null>(null)
+  const [promptError, setPromptError] = useState<string | null>(null)
+  const [preparingShotId, setPreparingShotId] = useState<string | null>(null)
+  const [shotMessage, setShotMessage] = useState<string | null>(null)
+  const [referenceMenu, setReferenceMenu] = useState<{
+    source: CanvasReferenceSource
+    x: number
+    y: number
+    flowPosition: { x: number; y: number }
+  } | null>(null)
   const [saveState, setSaveState] = useState<"idle" | "saving" | "saved" | "error">("idle")
   const [loadError, setLoadError] = useState<string | null>(null)
   const [addMenuOpen, setAddMenuOpen] = useState(false)
@@ -775,6 +886,9 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   const saveTimerRef = useRef<number | null>(null)
   const ignoreSaveRef = useRef(false)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const assignInputRef = useRef<HTMLInputElement | null>(null)
+  const assignTargetRef = useRef<string | null>(null)
+  const workspaceRef = useRef<HTMLDivElement | null>(null)
   const connectStartRef = useRef<{ nodeId: string; handleId: string | null } | null>(null)
   const selectedNodeId = useCanvasStore(state => state.selectedNodeId)
   const setSelectedNodeId = useCanvasStore(state => state.setSelectedNodeId)
@@ -784,7 +898,12 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   useEffect(() => { nodesRef.current = nodes }, [nodes])
   useEffect(() => { edgesRef.current = edges }, [edges])
 
-  const actionsRef = useRef<{ onInlineSave: FlowNodeData["onInlineSave"]; onDelete: FlowNodeData["onDelete"] }>({ onInlineSave: undefined, onDelete: undefined })
+  const actionsRef = useRef<Pick<FlowNodeData, "onInlineSave" | "onDelete" | "onAssignMedia" | "onGenerateFromText">>({
+    onInlineSave: undefined,
+    onDelete: undefined,
+    onAssignMedia: undefined,
+    onGenerateFromText: undefined,
+  })
 
   const applyDocument = useCallback((next: CanvasDocument, recordHistory = false) => {
     if (recordHistory && documentRef.current) {
@@ -1081,14 +1200,32 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
       if (!latest) return
       if (result.status === "succeeded" && result.asset) {
         const asset = result.asset
-        const nextNodes = latest.nodes.map(item => item.id === selectedRawNode.id
-          ? {
-              ...item,
-              status: "succeeded" as const,
-              assetRefs: [{ assetId: asset.id, type: asset.type, url: result.previewUrl || asset.url }],
-              updatedAt: Date.now(),
-            } as CanvasNode
-          : item)
+        const resultId = paramString(selectedRawNode.params, "resultAssetId")
+        const nextNodes = latest.nodes.map(item => {
+          if (item.id !== selectedRawNode.id) return item
+          const params = asParams(item.params)
+          const keptRefs = item.assetRefs.filter(ref => ref.assetId !== resultId && ref.assetId !== asset.id)
+          return {
+            ...item,
+            status: "succeeded" as const,
+            assetRefs: keptRefs,
+            params: {
+              ...params,
+              resultAssetId: asset.id,
+              outputHistory: prependCanvasOutputHistory(params.outputHistory, {
+                id: asset.id,
+                assetId: asset.id,
+                createdAt: Date.now(),
+                prompt,
+                modelId,
+                modelName,
+                mediaType,
+                aspectRatio: composerDraft.aspectRatio,
+              }),
+            },
+            updatedAt: Date.now(),
+          } as CanvasNode
+        })
         const next = { ...latest, nodes: nextNodes, assets: [...latest.assets.filter(item => item.id !== asset.id), asset] }
         setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
         scheduleSave(next)
@@ -1132,7 +1269,10 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
       })),
       edges: (document?.edges ?? []).map(edge => ({ source: edge.sourceNodeId, target: edge.targetNodeId })),
       acceptKinds,
-      excludeAssetIds: selectedRawNode.assetRefs.map(ref => ref.assetId),
+      excludeAssetIds: [
+        ...selectedRawNode.assetRefs.map(ref => ref.assetId),
+        paramString(selectedRawNode.params, "resultAssetId"),
+      ].filter(Boolean),
     })
     const model = models.find(item => item.id === composerDraft.modelId)
     const requiresPrompt = mediaType === "image" ? (model && "requiresPrompt" in model ? model.requiresPrompt : true) : true
@@ -1151,7 +1291,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
       mediaType,
       resolutionOptions: videoOptions.resolutions,
       durationOptions: videoOptions.durations,
-      referenceRefs: selectedRawNode.assetRefs,
+      referenceRefs: selectedRawNode.assetRefs.filter(ref => ref.assetId !== paramString(selectedRawNode.params, "resultAssetId")),
       edgeReferenceRefs: derived.references,
       unusableUpstreamCount: derived.unusableUpstreams.length,
       canvasImageAssets: referenceAssets,
@@ -1176,11 +1316,16 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           ...node.data,
           composer: isSelectedGeneration ? composerConfig : null,
           taskStatus: node.data.rawNode.status,
-          resultPreviewUrl: node.data.rawNode.assetRefs[0]?.url || null,
+          resultPreviewUrl: (() => {
+            const resultId = paramString(node.data.rawNode.params, "resultAssetId")
+            const asset = (document?.assets ?? []).find(item => item.id === resultId)
+            return asset?.url || null
+          })(),
+          resultPreviewKind: nodeGenerationMediaType(node.data.rawNode) === "video" ? "video" : "image",
         },
       }
     }))
-  }, [composerConfig, selectedNodeId])
+  }, [composerConfig, document?.assets, selectedNodeId])
 
   const sceneEntries: CanvasSceneSequenceEntry[] = useMemo(() => {
     const size = CANVAS_NODE_REGISTRY.scene.defaultSize
@@ -1387,13 +1532,231 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
     scheduleSave(next)
   }, [host, scheduleSave, screenToFlowPosition])
 
+  const placeAssetOnCanvas = useCallback((asset: CanvasAsset, origin?: { x: number; y: number }) => {
+    const current = documentRef.current
+    if (!current) return
+    const type = nodeTypeFromAsset(asset)
+    const definition = CANVAS_NODE_REGISTRY[type]
+    const position = origin ?? screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+    const timestamp = Date.now()
+    const node = {
+      id: crypto.randomUUID(),
+      canvasId: current.id,
+      projectId: current.projectId,
+      ownerUserId: MOCK_OWNER_ID,
+      title: asset.title || definition.label,
+      type,
+      position: { x: position.x - definition.defaultSize.width / 2, y: position.y - definition.defaultSize.height / 2 },
+      size: { ...definition.defaultSize },
+      status: "idle" as const,
+      assetRefs: [{ assetId: asset.id, type: asset.type, url: asset.url }],
+      params: paramsFromAsset(type, asset),
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    } as CanvasNode
+    const assets = current.assets.some(item => item.id === asset.id) ? current.assets : [...current.assets, asset]
+    const next = { ...current, assets, nodes: [...current.nodes, node] }
+    undoRef.current = [...undoRef.current, current].slice(-UNDO_LIMIT)
+    redoRef.current = []
+    setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
+    scheduleSave(next)
+    setSelectedNodeId(node.id)
+    return node
+  }, [scheduleSave, screenToFlowPosition, setSelectedNodeId])
+
+  const assignFilesToNode = useCallback(async (nodeId: string, files: File[]) => {
+    const current = documentRef.current
+    if (!current) return
+    const { accepted } = splitCanvasUploadFiles(files)
+    if (!accepted.length) return
+    const result = await uploadCanvasMedia({ host, files: accepted })
+    const asset = result.assets[0]
+    if (!asset) return
+    const nextNodes = current.nodes.map(item => {
+      if (item.id !== nodeId) return item
+      const params = asParams(item.params)
+      if (item.type === "scene" || item.type === "character") {
+        return {
+          ...item,
+          assetRefs: [{ assetId: asset.id, type: asset.type, url: asset.url }],
+          params: { ...params, mediaUrl: asset.url || "", mediaKind: asset.type, mediaMeta: JSON.stringify({ assetId: asset.id, title: asset.title }) },
+          updatedAt: Date.now(),
+        } as CanvasNode
+      }
+      return {
+        ...item,
+        assetRefs: [{ assetId: asset.id, type: asset.type, url: asset.url }],
+        params: { ...params, ...paramsFromAsset(item.type, asset) },
+        updatedAt: Date.now(),
+      } as CanvasNode
+    })
+    const assets = current.assets.some(item => item.id === asset.id) ? current.assets : [...current.assets, asset]
+    const next = { ...current, assets, nodes: nextNodes }
+    undoRef.current = [...undoRef.current, current].slice(-UNDO_LIMIT)
+    redoRef.current = []
+    setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
+    scheduleSave(next)
+  }, [host, scheduleSave])
+
+  const onAssignMedia = useCallback((nodeId: string, files?: File[]) => {
+    if (files?.length) {
+      void assignFilesToNode(nodeId, files)
+      return
+    }
+    assignTargetRef.current = nodeId
+    assignInputRef.current?.click()
+  }, [assignFilesToNode])
+
+  const addCanvasEdge = useCallback((sourceNodeId: string, targetNodeId: string, sourceHandle?: string | null, targetHandle?: string | null) => {
+    const current = documentRef.current
+    if (!current) return
+    if (current.edges.some(edge => edge.sourceNodeId === sourceNodeId && edge.targetNodeId === targetNodeId)) return
+    const timestamp = Date.now()
+    const edge: CanvasEdge = {
+      id: crypto.randomUUID(),
+      canvasId: current.id,
+      projectId: current.projectId,
+      ownerUserId: MOCK_OWNER_ID,
+      sourceNodeId,
+      targetNodeId,
+      sourceHandle: sourceHandle ?? "out",
+      targetHandle: targetHandle ?? null,
+      edgeType: "canvas",
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    }
+    const next = { ...current, edges: [...current.edges, edge] }
+    setEdges(next.edges.map(toFlowEdge))
+    scheduleSave(next)
+  }, [scheduleSave])
+
+  const onGenerateFromText = useCallback((nodeId: string) => {
+    const current = documentRef.current
+    if (!current) return
+    const source = current.nodes.find(node => node.id === nodeId)
+    if (!source || source.type !== "text") return
+    const text = paramString(source.params, "text").trim()
+    const created = createNode("generation", { x: source.position.x + source.size.width + 80, y: source.position.y }, defaultGenerationParams("image", imageModels[0]?.id || ""))
+    if (!created) return
+    if (text) patchNodeParams(created.id, { prompt: text, mediaType: "image", moduleKey: "text-to-image" }, false)
+    addCanvasEdge(source.id, created.id, "out", null)
+  }, [addCanvasEdge, createNode, imageModels, patchNodeParams])
+
+  const submitPrevisPrompt = useCallback((prompt: string) => {
+    const current = documentRef.current
+    if (!current) return
+    setPromptPending(true)
+    setPromptError(null)
+    try {
+      let target: CanvasNode | null = selectedRawNode?.type === "previs"
+        ? selectedRawNode
+        : current.nodes.find(node => node.type === "previs") ?? null
+      if (!target) {
+        const item = CANVAS_NODE_REGISTRY.previs
+        const center = screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 })
+        target = createNode("previs", { x: center.x - item.defaultSize.width / 2, y: center.y - item.defaultSize.height / 2 }) ?? null
+      }
+      if (!target) {
+        setPromptError("无法创建预演节点")
+        return
+      }
+      const latest = documentRef.current
+      const latestNode = latest?.nodes.find(node => node.id === target.id) ?? target
+      const result = applyPrevisPromptToDocument(parsePrevisDraftDocument(asParams(latestNode.params)), prompt)
+      if (result.error) {
+        setPromptError(result.error)
+        setPromptReply(null)
+        return
+      }
+      patchNodeParams(latestNode.id, writePrevisDraftDocument(result.document, asParams(latestNode.params)), false)
+      setPromptReply(result.reply)
+      setSelectedNodeId(latestNode.id)
+    } finally {
+      setPromptPending(false)
+    }
+  }, [createNode, patchNodeParams, screenToFlowPosition, selectedRawNode, setSelectedNodeId])
+
+  const preparePrevisShot = useCallback(async (shotId: string) => {
+    const current = documentRef.current
+    if (!current || !selectedRawNode || selectedRawNode.type !== "previs") return
+    setPreparingShotId(shotId)
+    setShotMessage(null)
+    try {
+      const rendered = await renderPrevisShotPng({ document: paramString(selectedRawNode.params, "document"), shotId })
+      const blob = await dataUrlToBlob(rendered.dataUrl)
+      const file = new File([blob], previsShotFileName(rendered.shotName, rendered.shotId), { type: "image/png" })
+      if (!host.uploadAsset) throw new Error("当前环境无法保存预演截图")
+      const asset = await host.uploadAsset(file)
+      const parsed = parsePrevisDraftDocument(asParams(selectedRawNode.params))
+      const scene = parsed ? previsDocumentScene(parsed) : null
+      const composed = scene ? previsShotPrompt({ scene, shotId }) : { prompt: selectedRawNode.title, durationSeconds: 4 }
+      const created = createNode(
+        "generation",
+        { x: selectedRawNode.position.x + selectedRawNode.size.width + 96, y: selectedRawNode.position.y },
+        {
+          ...defaultGenerationParams("video", videoModels[0]?.id || ""),
+          prompt: composed.prompt,
+          durationSeconds: String(composed.durationSeconds || 4),
+        },
+      )
+      if (!created) return
+      const latest = documentRef.current
+      if (latest) {
+        const nextNodes = latest.nodes.map(item => item.id === created.id
+          ? { ...item, assetRefs: [{ assetId: asset.id, type: asset.type, url: asset.url }], updatedAt: Date.now() } as CanvasNode
+          : item)
+        const assets = latest.assets.some(item => item.id === asset.id) ? latest.assets : [...latest.assets, asset]
+        const next = { ...latest, assets, nodes: nextNodes }
+        setNodes(next.nodes.map(item => toFlowNode(item, actionsRef.current)))
+        scheduleSave(next)
+      }
+      addCanvasEdge(selectedRawNode.id, created.id, "out", null)
+      setShotMessage(`已备好生成节点 ${created.id.slice(0, 8)}`)
+    } catch (error) {
+      setShotMessage(error instanceof Error ? error.message : "准备生成节点失败")
+    } finally {
+      setPreparingShotId(null)
+    }
+  }, [addCanvasEdge, createNode, host, scheduleSave, selectedRawNode, videoModels])
+
+  actionsRef.current = { onInlineSave: saveInline, onDelete: deleteNode, onAssignMedia, onGenerateFromText }
+
+  const onConnectEnd: OnConnectEnd = useCallback((event) => {
+    const start = connectStartRef.current
+    connectStartRef.current = null
+    if (!start?.nodeId) return
+    const target = "target" in event ? event.target as HTMLElement | null : null
+    if (!target?.classList?.contains("react-flow__pane")) return
+    const current = documentRef.current
+    const sourceNode = current?.nodes.find(node => node.id === start.nodeId)
+    if (!sourceNode) return
+    const point = "clientX" in event ? { x: event.clientX, y: event.clientY } : null
+    if (!point) return
+    const bounds = workspaceRef.current?.getBoundingClientRect()
+    const flowPosition = screenToFlowPosition(point)
+    setReferenceMenu({
+      source: { id: sourceNode.id, type: sourceNode.type, params: sourceNode.params, sourceHandle: start.handleId },
+      x: point.x - (bounds?.left ?? 0) + 8,
+      y: point.y - (bounds?.top ?? 0) + 8,
+      flowPosition,
+    })
+  }, [screenToFlowPosition])
+
+
   const onDrop = useCallback((event: DragEvent) => {
     event.preventDefault()
     const files = Array.from(event.dataTransfer.files)
     if (!files.length) return
+    const nodeEl = (event.target as HTMLElement | null)?.closest?.(".react-flow__node")
+    const nodeId = nodeEl?.getAttribute("data-id")
+    const target = nodeId ? documentRef.current?.nodes.find(node => node.id === nodeId) : null
+    if (target && (target.type === "image" || target.type === "video" || target.type === "audio" || target.type === "scene" || target.type === "character")) {
+      void assignFilesToNode(target.id, files)
+      return
+    }
     const position = screenToFlowPosition({ x: event.clientX, y: event.clientY })
     void placeFiles(files, position)
-  }, [placeFiles, screenToFlowPosition])
+  }, [assignFilesToNode, placeFiles, screenToFlowPosition])
 
   const restoreDocument = useCallback((next: CanvasDocument) => {
     applyDocument(next, false)
@@ -1570,7 +1933,7 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
   }
 
   return (
-    <div className="relative h-full w-full overflow-hidden" style={{ background: CANVAS_BACKGROUND }}>
+    <div ref={workspaceRef} className="relative h-full w-full overflow-hidden" style={{ background: CANVAS_BACKGROUND }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -1580,6 +1943,8 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         onEdgesChange={onEdgesChange}
         onConnect={onConnect}
         onConnectStart={onConnectStart}
+        onConnectEnd={onConnectEnd}
+        onPaneClick={() => setReferenceMenu(null)}
         isValidConnection={isValidConnection}
         onNodeDrag={onNodeDrag}
         onNodeDragStop={onNodeDragStop}
@@ -1597,7 +1962,14 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         fitView
         proOptions={{ hideAttribution: true }}
       >
-        <Background variant={BackgroundVariant.Dots} gap={22} size={1.2} color={CANVAS_DOT} />
+        {backgroundMode !== "none" ? (
+          <Background
+            variant={backgroundMode === "lines" ? BackgroundVariant.Lines : BackgroundVariant.Dots}
+            gap={22}
+            size={1.2}
+            color={CANVAS_DOT}
+          />
+        ) : null}
         <Controls showInteractive={false} />
         {showMinimap ? <MiniMap pannable zoomable maskColor="rgba(0,0,0,0.45)" /> : null}
         <CanvasSnapGuideLines guides={guides} />
@@ -1678,26 +2050,35 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
             3D 预演
           </button>
           <span className="mx-1 h-4 w-px bg-white/10" />
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => fileInputRef.current?.click()} title="Upload">
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => fileInputRef.current?.click()} title="上传素材" aria-label="上传素材">
             <Upload className="h-4 w-4" />
           </button>
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={undo} title="Undo">
+          <button type="button" className={`rounded-xl p-1.5 hover:bg-surface-hover ${assetLibraryOpen ? "text-text-primary" : "text-text-secondary"}`} onClick={() => setAssetLibraryOpen(open => !open)} title="打开素材库" aria-label="打开素材库">
+            <ImagePlus className="h-4 w-4" />
+          </button>
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={undo} title="撤销 (Ctrl+Z)" aria-label="撤销">
             <Undo2 className="h-4 w-4" />
           </button>
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={redo} title="Redo">
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={redo} title="重做 (Ctrl+Shift+Z)" aria-label="重做">
             <Redo2 className="h-4 w-4" />
           </button>
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => void fitView({ duration: canvasMotionDuration(240), padding: 0.16 })} title="Fit">
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => void fitView({ duration: canvasMotionDuration(240), padding: 0.16 })} title="适应视图" aria-label="适应视图">
             <Maximize2 className="h-4 w-4" />
           </button>
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowMinimap(value => !value)} title="Minimap">
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => void setViewport({ ...getViewport(), zoom: 1 })} title="缩放 100%" aria-label="缩放 100%">
+            <ZoomIn className="h-4 w-4" />
+          </button>
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowMinimap(value => !value)} title={showMinimap ? "隐藏小地图" : "显示小地图"} aria-label="切换小地图">
             <MapIcon className="h-4 w-4" />
           </button>
-          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowHelp(true)} title="Shortcuts">
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setBackgroundMode(mode => mode === "dots" ? "lines" : mode === "lines" ? "none" : "dots")} title={`背景：${backgroundMode === "dots" ? "点阵" : backgroundMode === "lines" ? "网格" : "空白"}`} aria-label="切换背景">
+            <LayoutGrid className="h-4 w-4" />
+          </button>
+          <button type="button" className="rounded-xl p-1.5 text-text-secondary hover:bg-surface-hover" onClick={() => setShowHelp(true)} title="打开快捷键说明" aria-label="打开快捷键说明">
             <Keyboard className="h-4 w-4" />
           </button>
           <span className="ml-2 text-[10px] text-text-weak">
-            {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : saveState === "error" ? "Save failed" : ""}
+            {saveState === "saving" ? "自动保存中…" : saveState === "saved" ? "已保存" : saveState === "error" ? "自动保存失败，请重试" : ""}
           </span>
         </div>
       </div>
@@ -1714,8 +2095,42 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
           if (files.length) void placeFiles(files)
         }}
       />
+      <input
+        ref={assignInputRef}
+        type="file"
+        accept={CANVAS_UPLOAD_ACCEPT}
+        className="hidden"
+        onChange={event => {
+          const files = Array.from(event.target.files || [])
+          const nodeId = assignTargetRef.current
+          event.target.value = ""
+          assignTargetRef.current = null
+          if (nodeId && files.length) void assignFilesToNode(nodeId, files)
+        }}
+      />
+
+      {assetLibraryOpen ? (
+        <div className="absolute bottom-24 left-4 top-20 z-30">
+          <CanvasAssetLibrary
+            assets={document.assets}
+            onClose={() => setAssetLibraryOpen(false)}
+            onInsert={asset => { placeAssetOnCanvas(asset); setAssetLibraryOpen(false) }}
+          />
+        </div>
+      ) : null}
 
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-stretch gap-2 p-3">
+        <div className="pointer-events-auto mx-auto w-full max-w-[min(96vw,1100px)]">
+          <CanvasPromptBar
+            targetNodeId={selectedRawNode?.type === "previs" ? selectedRawNode.id : (document.nodes.find(node => node.type === "previs")?.id ?? null)}
+            targetLabel={selectedRawNode?.type === "previs" ? selectedRawNode.title : (document.nodes.find(node => node.type === "previs")?.title ?? null)}
+            pending={promptPending}
+            reply={promptReply}
+            error={promptError}
+            onSubmit={submitPrevisPrompt}
+            onUpload={() => fileInputRef.current?.click()}
+          />
+        </div>
         <div className="pointer-events-auto mx-auto w-full max-w-[min(96vw,1100px)]">
           <CanvasSceneStrip
             entries={sceneEntries}
@@ -1801,8 +2216,8 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
         </div>
       ) : null}
 
-      {selectedRawNode && (selectedRawNode.type === "storyboard" || selectedRawNode.type === "previs" || selectedRawNode.type === "script") ? (
-        <aside className="absolute bottom-24 right-20 top-20 z-20 flex w-80 flex-col overflow-auto rounded-2xl border border-border-default bg-surface-overlay/95 p-3 shadow-2xl">
+      {selectedRawNode && ["storyboard", "previs", "script", "scene", "character", "audio", "image", "video", "generation"].includes(selectedRawNode.type) ? (
+        <aside className="absolute bottom-28 right-20 top-20 z-20 flex w-80 flex-col overflow-auto rounded-2xl border border-border-default bg-surface-overlay/95 p-3 shadow-2xl">
           {selectedRawNode.type === "storyboard" ? (
             <StoryboardInspector
               draft={inspectorDraft}
@@ -1820,8 +2235,11 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
                 setInspectorDraft(draft)
                 patchNodeParams(selectedRawNode.id, draft, false)
               }}
+              preparingShotId={preparingShotId}
+              shotMessage={shotMessage}
+              onPrepareShot={shotId => { void preparePrevisShot(shotId) }}
             />
-          ) : (
+          ) : selectedRawNode.type === "script" ? (
             <ScriptInspector
               draft={inspectorDraft}
               setDraft={draft => {
@@ -1829,15 +2247,80 @@ function CanvasWorkspaceInner({ host }: { host: HostPort }) {
                 patchNodeParams(selectedRawNode.id, draft, false)
               }}
             />
+          ) : selectedRawNode.type === "scene" ? (
+            <CanvasSceneInspector
+              draft={inspectorDraft}
+              setDraft={draft => {
+                setInspectorDraft(draft)
+                patchNodeParams(selectedRawNode.id, draft, false)
+              }}
+              assets={document.assets}
+              onUpload={() => onAssignMedia(selectedRawNode.id)}
+            />
+          ) : selectedRawNode.type === "character" ? (
+            <CanvasCharacterInspector
+              draft={inspectorDraft}
+              setDraft={draft => {
+                setInspectorDraft(draft)
+                patchNodeParams(selectedRawNode.id, draft, false)
+              }}
+              assets={document.assets}
+              onUpload={() => onAssignMedia(selectedRawNode.id)}
+            />
+          ) : selectedRawNode.type === "audio" ? (
+            <CanvasAudioInspector
+              draft={inspectorDraft}
+              setDraft={draft => {
+                setInspectorDraft(draft)
+                patchNodeParams(selectedRawNode.id, draft, false)
+              }}
+              assets={document.assets}
+              onUpload={() => onAssignMedia(selectedRawNode.id)}
+            />
+          ) : selectedRawNode.type === "image" || selectedRawNode.type === "video" ? (
+            <CanvasMediaNodeInspector
+              kind={selectedRawNode.type}
+              draft={inspectorDraft}
+              setDraft={draft => {
+                setInspectorDraft(draft)
+                patchNodeParams(selectedRawNode.id, draft, false)
+              }}
+              assets={document.assets}
+              onUpload={() => onAssignMedia(selectedRawNode.id)}
+            />
+          ) : (
+            <CanvasNodeOutputHistory
+              historyRaw={paramString(selectedRawNode.params, "outputHistory")}
+              assets={document.assets}
+              onCreateNode={(_entry, asset) => placeAssetOnCanvas(asset, { x: selectedRawNode.position.x + selectedRawNode.size.width + 64, y: selectedRawNode.position.y })}
+            />
           )}
         </aside>
+      ) : null}
+
+      {referenceMenu ? (
+        <CanvasReferenceMenuPanel
+          source={referenceMenu.source}
+          x={referenceMenu.x}
+          y={referenceMenu.y}
+          onClose={() => setReferenceMenu(null)}
+          onSelect={target => {
+            const item = CANVAS_NODE_REGISTRY[target.nodeType]
+            const created = createNode(target.nodeType, {
+              x: referenceMenu.flowPosition.x - item.defaultSize.width / 2,
+              y: referenceMenu.flowPosition.y - item.defaultSize.height / 2,
+            }, target.params)
+            if (created && target.connect) addCanvasEdge(referenceMenu.source.id, created.id, referenceMenu.source.sourceHandle ?? "out", null)
+            setReferenceMenu(null)
+          }}
+        />
       ) : null}
 
       {showHelp ? createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowHelp(false)}>
           <div className="max-h-[80vh] w-full max-w-2xl overflow-auto rounded-2xl border border-border-default bg-surface-overlay p-5" onClick={event => event.stopPropagation()}>
             <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-sm font-semibold text-text-primary">Shortcuts</h2>
+              <h2 className="text-sm font-semibold text-text-primary">快捷键说明 (Windows)</h2>
               <button type="button" onClick={() => setShowHelp(false)} className="rounded-md p-1 text-text-secondary hover:bg-surface-hover">
                 <X className="h-4 w-4" />
               </button>
